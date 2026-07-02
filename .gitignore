@@ -29,3 +29,6 @@ report.html
 capture*.csv
 examples/demo_capture.csv
 robot/results/
+
+*.md
+!README.md
