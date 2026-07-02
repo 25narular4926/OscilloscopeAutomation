@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tests / coverage / reports
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+report.xml
+output.xml
+log.html
+report.html
+
+# Local bench secrets — instrument addresses live here, never committed
+.env
+*.local.toml
+
+# Captures / scratch
+*.npz
+*.mf4
+capture*.csv
+examples/demo_capture.csv
+robot/results/

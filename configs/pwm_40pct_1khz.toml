@@ -1,0 +1,50 @@
+# Example test case: verify an ECM PWM output pin.
+# "the PWM pin puts out 40% duty at 1 kHz, 0-5 V" (deck slide 2).
+#
+# A test case is data: scope setup + expected values + tolerances + a
+# requirement id for ASPICE traceability. Validate before touching hardware.
+
+requirement_id = "REQ-ECM-PWM-001"
+name = "PWM output pin: 40% duty @ 1 kHz, 0-5 V"
+description = "Verify the ECM PWM output frequency, duty cycle, and levels."
+
+[setup]
+channel = "CH1"
+coupling = "DC"
+vertical_scale = 1.0          # V/div
+vertical_offset = -2.5        # center the 0-5 V swing
+sample_rate = 2.5e6           # samples/s
+record_length = 100000
+trigger_source = "CH1"
+trigger_level = 2.5
+trigger_slope = "RISe"
+
+[[expects]]
+kind = "frequency"
+expected = 1000.0
+units = "Hz"
+rel = 0.01                    # +/- 1%
+
+[[expects]]
+kind = "duty"
+expected = 40.0
+units = "%"
+abs = 1.0                     # +/- 1 percentage point
+
+[[expects]]
+kind = "vamplitude"
+expected = 5.0
+units = "V"
+rel = 0.05                    # +/- 5%
+
+[[expects]]
+kind = "vlow"
+expected = 0.0
+units = "V"
+abs = 0.2
+
+[[expects]]
+kind = "vhigh"
+expected = 5.0
+units = "V"
+abs = 0.2

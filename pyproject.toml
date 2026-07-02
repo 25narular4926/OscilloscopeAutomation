@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scopeblock"
+version = "0.1.0"
+description = "Oscilloscope automation scope block for an ECM HIL bench (Tektronix MSO44B + AFG31102)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "KPIT Internship - V&V Automation" }]
+dependencies = [
+    "numpy>=1.24",
+    "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+# Live hardware acquisition. Not needed for the offline pipeline or unit tests.
+hardware = ["pyvisa>=1.13"]
+# MF4 export (automotive measurement format).
+mf4 = ["asammdf>=7.0"]
+# Optional Tektronix high-level / high-speed transport, wired behind the Transport interface.
+tek = ["tm_devices", "tm_data_types"]
+# Acceptance-test layer (optional, wraps the pytest fixtures).
+robot = ["robotframework>=6.0"]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    "tomli; python_version < '3.11'",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "hardware: requires a live bench (SCOPE_RESOURCE / AFG_RESOURCE env vars); skipped by default",
+]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["scopeblock"]
+ignore_missing_imports = true

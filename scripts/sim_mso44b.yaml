@@ -1,0 +1,17 @@
+spec: "1.1"
+devices:
+  mso44b:
+    eom:
+      TCPIP INSTR: { q: "\n", r: "\n" }
+    dialogues:
+      - q: "*IDN?"
+        r: "TEKTRONIX,MSO44,SIM0001,FV:sim"
+      - q: "ALLEV?"
+        r: '0,"No events to report - queue empty"'
+      # the hygiene writes are declared so the sim accepts them (no reply)
+      - q: "HEADer OFF"
+      - q: "VERBose OFF"
+      - q: "*CLS"
+resources:
+  TCPIP0::sim-scope::INSTR:
+    device: mso44b
