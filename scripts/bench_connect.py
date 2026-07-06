@@ -54,8 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     # otherwise fall back to the SCOPE_RESOURCE environment variable, instrument address never hardcoded
 
 
-    # backend also comes from outside the code (flag or env var), never hardcoded:
-    # e.g. '@py' for pyvisa-py, or 'scripts/sim_mso44b.yaml@sim' for the simulator.
+    # create the backend
     backend = args.backend or os.environ.get("VISA_BACKEND", "")
 
     # loads the VISA driver if no pyvisa backend is found then pyvisa raise ValueError
@@ -68,11 +67,11 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     # No resource given: list what VISA can see and exit with guidance.
-    if not resource:
+    if not resource:  # triggers only if you gave neither --resource nor SCOPE_RESOURCE.
         print("SCOPE_RESOURCE is unset and --resource was not given.", file=sys.stderr)
         try:
             visible = rm.list_resources()
-        except Exception as exc:  # backend may fail to enumerate
+        except Exception as exc: 
             visible = ()
             print(f"(could not list resources: {exc})", file=sys.stderr)
         print("Visible VISA resources:", visible or "(none found)", file=sys.stderr)
@@ -81,18 +80,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        # Context manager guarantees the session closes even on error/Ctrl-C,
-        # so no lingering lock blocks the next connection.
-        with rm.open_resource(resource) as inst:
-            inst.timeout = args.timeout          # ms — hard cap, never hangs
+        with rm.open_resource(resource) as inst:  #creates a context manager
+            inst.timeout = args.timeout          
             inst.read_termination = "\n"
             inst.write_termination = "\n"
 
             # Handshake: prove two-way communication.
             idn = inst.query("*IDN?").strip()
-            print("IDN:", idn)
+            print("IDN:", idn) # prints out identity of the resource or device
 
-            # Session hygiene: bare query replies + a clean error queue.
+            # Session hygiene
             for cmd in ("HEADer OFF", "VERBose OFF", "*CLS"):
                 inst.write(cmd)
 
@@ -101,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             print("ERR:", errors)
 
         return 0
+    # catches VISA IO Error essentially timeout, cable pulled, or bad command
     except pyvisa.errors.VisaIOError as exc:
         print(f"VISA I/O error talking to {resource!r}: {exc}", file=sys.stderr)
         return 1
