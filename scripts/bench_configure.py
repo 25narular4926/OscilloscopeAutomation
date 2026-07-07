@@ -1,29 +1,16 @@
 #!/usr/bin/env python3
-"""
-bench_configure.py — Function 3 (configure) as a standalone script.
 
-Pushes a complete scope setup — vertical, horizontal, trigger, and the
-waveform-transfer settings — to the MSO44B and returns exactly what was sent
-(an AppliedState command log) for traceability. Reuses connect()/identify()
-from bench_identify.py for the session; scaling happens nowhere here.
 
-The SCPI is emitted in a deliberate order via a send() helper that skips any
-field left None, so a partial config leaves the rest at instrument defaults:
+# cd c:/Users/25nar/KPITInternship/Autonomation/scripts
 
-    vertical    SELect:<ch> ON, <ch>:SCAle, <ch>:OFFSet, <ch>:COUPling
-    horizontal  HORizontal:SAMPLERate, HORizontal:SCAle, HORizontal:RECOrdlength
-    trigger     TRIGger:A:TYPe EDGE, :EDGE:SOUrce, :LEVel:<src>, :EDGE:SLOpe
-    transfer    DATa:SOURce/ENCdg/WIDth/STARt/STOP
+# python -c "import pyvisa, pyvisa_sim; print(pyvisa.__version__, pyvisa_sim.__version__)"
 
---dry-run builds the command log against an in-memory recorder (no hardware),
-so the exact SCPI and its order can be verified offline.
+# python bench_configure.py --backend sim_mso44b.yaml@sim --resource "TCPIP0::sim-scope::INSTR"
 
-Exit codes:
-    0  configured, error queue clean (or dry-run printed the command log)
-    1  VISA I/O failure or an instrument-reported error
-    2  no resource: SCOPE_RESOURCE unset and --resource not given
-    3  pyvisa not installed
-"""
+
+
+
+
 from __future__ import annotations
 
 import argparse
@@ -32,13 +19,14 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any
 
+# allows for validation without pydantic if the type is incorrect it would accept it silently
+# however with pydantic it would catch the error immediately
 from pydantic import BaseModel
 
 from bench_identify import connect, identify
 
-
+# default of none thus | None
 class ScopeSetup(BaseModel):
-    """A validated scope setup. Any None field is left at the instrument default."""
 
     channel: str = "CH1"
     vertical_scale: float | None = None      # volts/div
@@ -54,12 +42,13 @@ class ScopeSetup(BaseModel):
     byte_width: int = 2
 
 
-@dataclass
+@dataclass #dataclass since it just needs to hold and carry the data
+
+# What configure() actually pushed — the traceable record of the setup. "output script"
 class AppliedState:
-    """What configure() actually pushed — the traceable record of the setup."""
 
     channel: str
-    commands: list[str] = field(default_factory=list)
+    commands: list[str] = field(default_factory=list) # fresh entry or empty list/dict
     idn: str = ""
     settings: dict[str, Any] = field(default_factory=dict)
 
@@ -95,10 +84,12 @@ def configure(inst, config: Any) -> AppliedState:
     ch = getattr(config, "channel", "CH1")
     cmds: list[str] = []
 
+    # returns cmds as the list in the AppliedState class
+
     def send(cmd: str) -> None:
         inst.write(cmd)
         cmds.append(cmd)
-
+ 
     # Vertical.
     send(f"SELect:{ch} ON")
     if getattr(config, "vertical_scale", None) is not None:
@@ -145,23 +136,23 @@ def configure(inst, config: Any) -> AppliedState:
     )
 
 
-class _Recorder:
-    """In-memory stand-in for a VISA session: records writes, answers sync queries."""
+# class _Recorder:
+#     """In-memory stand-in for a VISA session: records writes, answers sync queries."""
 
-    def __init__(self) -> None:
-        self.history: list[str] = []
+#     def __init__(self) -> None:
+#         self.history: list[str] = []
 
-    def write(self, cmd: str) -> None:
-        self.history.append(cmd)
+#     def write(self, cmd: str) -> None:
+#         self.history.append(cmd)
 
-    def query(self, cmd: str) -> str:
-        self.history.append(cmd)
-        key = cmd.strip().upper()
-        if key == "*ESR?":
-            return "0"
-        if key.startswith("ALLEV"):
-            return '0,"No events to report - queue empty"'
-        return ""
+#     def query(self, cmd: str) -> str:
+#         self.history.append(cmd)
+#         key = cmd.strip().upper()
+#         if key == "*ESR?":
+#             return "0"
+#         if key.startswith("ALLEV"):
+#             return '0,"No events to report - queue empty"'
+#         return ""
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -248,3 +239,31 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+
+# ways to use this configuration script
+
+
+# #from bench_configure import ScopeSetup, configure, _Recorder
+
+# setup = ScopeSetup(
+#     channel="CH1",
+#     vertical_scale=0.5,
+#     coupling="DC",
+#     record_length=100_000,
+#     trigger_source="CH1",
+#     trigger_level=1.0,
+#     trigger_slope="RISe",
+# )
+
+# # dry-run offline:
+# applied = configure(_Recorder(), setup)
+# print(applied.commands)
+
+# # or on real hardware:
+# # from bench_identify import connect, identify
+# # inst, rm = connect(resource, 5000, "")
+# # with inst:
+# #     configure(inst, setup)
+

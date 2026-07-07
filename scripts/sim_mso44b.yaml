@@ -8,10 +8,77 @@ devices:
         r: "TEKTRONIX,MSO44,SIM0001,FV:sim"
       - q: "ALLEV?"
         r: '0,"No events to report - queue empty"'
-      # the hygiene writes are declared so the sim accepts them (no reply)
+      # error-status query issued by check_errors() after configure sends its writes
+      - q: "*ESR?"
+        r: "0"
+      # session-hygiene writes (from identify()) — accepted, no reply
       - q: "HEADer OFF"
       - q: "VERBose OFF"
       - q: "*CLS"
+    # Stateful settings: every configure() write is STORED and can be queried back,
+    # so a write->readback round-trip proves the command actually landed on the sim.
+    # Values are stored verbatim as strings so the readback echoes exactly what was sent.
+    properties:
+      select_ch1:
+        default: "OFF"
+        getter: { q: "SELect:CH1?", r: "{:s}" }
+        setter: { q: "SELect:CH1 {:s}" }
+      ch1_scale:
+        default: "0"
+        getter: { q: "CH1:SCAle?", r: "{:s}" }
+        setter: { q: "CH1:SCAle {:s}" }
+      ch1_offset:
+        default: "0"
+        getter: { q: "CH1:OFFSet?", r: "{:s}" }
+        setter: { q: "CH1:OFFSet {:s}" }
+      ch1_coupling:
+        default: "DC"
+        getter: { q: "CH1:COUPling?", r: "{:s}" }
+        setter: { q: "CH1:COUPling {:s}" }
+      hor_samplerate:
+        default: "0"
+        getter: { q: "HORizontal:SAMPLERate?", r: "{:s}" }
+        setter: { q: "HORizontal:SAMPLERate {:s}" }
+      hor_recordlength:
+        default: "0"
+        getter: { q: "HORizontal:RECOrdlength?", r: "{:s}" }
+        setter: { q: "HORizontal:RECOrdlength {:s}" }
+      trig_type:
+        default: "EDGE"
+        getter: { q: "TRIGger:A:TYPe?", r: "{:s}" }
+        setter: { q: "TRIGger:A:TYPe {:s}" }
+      trig_source:
+        default: "CH1"
+        getter: { q: "TRIGger:A:EDGE:SOUrce?", r: "{:s}" }
+        setter: { q: "TRIGger:A:EDGE:SOUrce {:s}" }
+      trig_level:
+        default: "0"
+        getter: { q: "TRIGger:A:LEVel:CH1?", r: "{:s}" }
+        setter: { q: "TRIGger:A:LEVel:CH1 {:s}" }
+      trig_slope:
+        default: "RISe"
+        getter: { q: "TRIGger:A:EDGE:SLOpe?", r: "{:s}" }
+        setter: { q: "TRIGger:A:EDGE:SLOpe {:s}" }
+      data_source:
+        default: "CH1"
+        getter: { q: "DATa:SOURce?", r: "{:s}" }
+        setter: { q: "DATa:SOURce {:s}" }
+      data_encdg:
+        default: "SRIBinary"
+        getter: { q: "DATa:ENCdg?", r: "{:s}" }
+        setter: { q: "DATa:ENCdg {:s}" }
+      data_width:
+        default: "1"
+        getter: { q: "DATa:WIDth?", r: "{:s}" }
+        setter: { q: "DATa:WIDth {:s}" }
+      data_start:
+        default: "1"
+        getter: { q: "DATa:STARt?", r: "{:s}" }
+        setter: { q: "DATa:STARt {:s}" }
+      data_stop:
+        default: "1"
+        getter: { q: "DATa:STOP?", r: "{:s}" }
+        setter: { q: "DATa:STOP {:s}" }
 resources:
   TCPIP0::sim-scope::INSTR:
     device: mso44b

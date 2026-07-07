@@ -43,10 +43,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def connect(resource: str, timeout: int, backend: str):
-    """
-    Acts as the VisaTransport layer.
-    Opens the VISA resource and configures basic I/O settings.
-    """
+    #Acts as the VisaTransport layer.
+    #Opens the VISA resource and configures basic I/O settings.
+    #does not know anything about oscilloscpe, SCPI, or others, just estabolishes a secure VISA connection
     import pyvisa
     
     try:
@@ -56,6 +55,7 @@ def connect(resource: str, timeout: int, backend: str):
         raise
 
     inst = rm.open_resource(resource)
+    # hard cap timeout
     inst.timeout = timeout          
     inst.read_termination = "\n"
     inst.write_termination = "\n"
@@ -64,14 +64,13 @@ def connect(resource: str, timeout: int, backend: str):
 
 
 def identify(inst) -> str:
-    """
-    Acts as the MSO44B.session_setup() layer.
-    Queries *IDN?, sets session hygiene, and returns the identity.
-    """
+
+   # Queries *IDN?, sets session hygiene, and returns the identity.
+    
+    # does not know about any connection, just expects an instrument and thus calls .query
     # Confirm instrument identity
     idn = inst.query("*IDN?").strip()
     
-    # Session hygiene: puts the instrument in a known, parse-friendly state
     for cmd in ("HEADer OFF", "VERBose OFF", "*CLS"):
         inst.write(cmd)
         
@@ -105,15 +104,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        # 1. Connect (VisaTransport equivalent)
+        # 1. Connect 
         inst, rm = connect(resource, args.timeout, backend)
         
         with inst:
-            # 2. Identify (MSO44B session_setup equivalent)
+            # 2. Identify 
             idn = identify(inst)
             print("IDN:", idn)
 
-            # Check errors to prove the queue is clean (simulating check_errors)
+            # Check errors to prove the queue is clean 
             errors = inst.query("ALLEV?").strip()
             print("ERR:", errors if errors else "none")
             
