@@ -89,7 +89,7 @@ def read_waveform(inst, source: str = "CH1") -> Waveform:
     inst.write("DATa:ENCdg ASCii")     # ASCII so the curve round-trips through pyvisa-sim
 
     def qf(field_name: str) -> str:
-        return inst.query(f"WFMOutpre:{field_name}?").strip()
+        return inst.query(f"WFMOutpre:{field_name}?").strip()  # WFMOutpre is a tektronix command group holding metadata that describes the next CURVe? transfer
 
     xincr = float(qf("XINCR"))
     xzero = float(qf("XZERO"))
