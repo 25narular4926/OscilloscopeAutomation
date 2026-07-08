@@ -79,9 +79,9 @@ def check_errors(inst) -> None:
         raise ScopeError(f"instrument error (ESR={esr}): {events}")
 
 
-def configure(inst, config: Any) -> AppliedState:
+def configure(inst, scope_setup: Any) -> AppliedState:
     """Apply vertical/horizontal/trigger/transfer settings; return the command log."""
-    ch = getattr(config, "channel", "CH1")
+    ch = getattr(scope_setup, "channel", "CH1")
     cmds: list[str] = []
 
     # returns cmds as the list in the AppliedState class
@@ -92,35 +92,35 @@ def configure(inst, config: Any) -> AppliedState:
  
     # Vertical.
     send(f"SELect:{ch} ON")
-    if getattr(config, "vertical_scale", None) is not None:
-        send(f"{ch}:SCAle {config.vertical_scale}")
-    if getattr(config, "vertical_offset", None) is not None:
-        send(f"{ch}:OFFSet {config.vertical_offset}")
-    if getattr(config, "coupling", None):
-        send(f"{ch}:COUPling {config.coupling}")
+    if getattr(scope_setup, "vertical_scale", None) is not None:
+        send(f"{ch}:SCAle {scope_setup.vertical_scale}")
+    if getattr(scope_setup, "vertical_offset", None) is not None:
+        send(f"{ch}:OFFSet {scope_setup.vertical_offset}")
+    if getattr(scope_setup, "coupling", None):
+        send(f"{ch}:COUPling {scope_setup.coupling}")
 
     # Horizontal.
-    if getattr(config, "sample_rate", None):
-        send(f"HORizontal:SAMPLERate {config.sample_rate}")
-    if getattr(config, "horizontal_scale", None):
-        send(f"HORizontal:SCAle {config.horizontal_scale}")
-    record_length = getattr(config, "record_length", None)
+    if getattr(scope_setup, "sample_rate", None):
+        send(f"HORizontal:SAMPLERate {scope_setup.sample_rate}")
+    if getattr(scope_setup, "horizontal_scale", None):
+        send(f"HORizontal:SCAle {scope_setup.horizontal_scale}")
+    record_length = getattr(scope_setup, "record_length", None)
     if record_length:
         send(f"HORizontal:RECOrdlength {record_length}")
 
     # Trigger.
-    if getattr(config, "trigger_source", None):
+    if getattr(scope_setup, "trigger_source", None):
         send("TRIGger:A:TYPe EDGE")
-        send(f"TRIGger:A:EDGE:SOUrce {config.trigger_source}")
-        if getattr(config, "trigger_level", None) is not None:
-            send(f"TRIGger:A:LEVel:{config.trigger_source} {config.trigger_level}")
-        if getattr(config, "trigger_slope", None):
-            send(f"TRIGger:A:EDGE:SLOpe {config.trigger_slope}")
+        send(f"TRIGger:A:EDGE:SOUrce {scope_setup.trigger_source}")
+        if getattr(scope_setup, "trigger_level", None) is not None:
+            send(f"TRIGger:A:LEVel:{scope_setup.trigger_source} {scope_setup.trigger_level}")
+        if getattr(scope_setup, "trigger_slope", None):
+            send(f"TRIGger:A:EDGE:SLOpe {scope_setup.trigger_slope}")
 
     # Waveform transfer.
     send(f"DATa:SOURce {ch}")
-    send(f"DATa:ENCdg {getattr(config, 'encoding', 'SRIBinary')}")
-    send(f"DATa:WIDth {getattr(config, 'byte_width', 2)}")
+    send(f"DATa:ENCdg {getattr(scope_setup, 'encoding', 'SRIBinary')}")
+    send(f"DATa:WIDth {getattr(scope_setup, 'byte_width', 2)}")
     send("DATa:STARt 1")
     send(f"DATa:STOP {record_length or 1_000_000}")
 
@@ -129,9 +129,9 @@ def configure(inst, config: Any) -> AppliedState:
         channel=ch,
         commands=cmds,
         settings={
-            "vertical_scale": getattr(config, "vertical_scale", None),
+            "vertical_scale": getattr(scope_setup, "vertical_scale", None),
             "record_length": record_length,
-            "trigger_source": getattr(config, "trigger_source", None),
+            "trigger_source": getattr(scope_setup, "trigger_source", None),
         },
     )
 
@@ -185,14 +185,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    config = DEFAULT_SETUP
-
-    if args.dry_run:
-        applied = configure(_Recorder(), config)
-        print("DRY RUN — commands that would be sent:")
-        for cmd in applied.commands:
-            print("  ", cmd)
-        return 0
+    scope_setup = DEFAULT_SETUP
 
     try:
         import pyvisa
@@ -216,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
             idn = identify(inst)
             print("IDN:", idn)
 
-            applied = configure(inst, config)
+            applied = configure(inst, scope_setup)
             applied.idn = idn
             print(f"Applied {len(applied.commands)} commands to {applied.channel}.")
 

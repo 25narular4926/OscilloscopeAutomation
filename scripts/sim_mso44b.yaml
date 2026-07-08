@@ -15,6 +15,32 @@ devices:
       - q: "HEADer OFF"
       - q: "VERBose OFF"
       - q: "*CLS"
+      # acquire(): arm a single-sequence capture, then wait on operation-complete.
+      - q: "ACQuire:STOPAfter SEQuence"
+      - q: "ACQuire:STATE RUN"
+      - q: "*OPC?"
+        r: "1"
+      # read_waveform(): WFMOutpre preamble fields, queried individually.
+      # Matches the synthetic sine below: 200 pts, YMULT 0.01, XINCR 1e-6, +/-200 codes.
+      - q: "WFMOutpre:XINCR?"
+        r: "1e-06"
+      - q: "WFMOutpre:XZERO?"
+        r: "0.0"
+      - q: "WFMOutpre:PT_OFF?"
+        r: "0"
+      - q: "WFMOutpre:YMULT?"
+        r: "0.01"
+      - q: "WFMOutpre:YOFF?"
+        r: "0.0"
+      - q: "WFMOutpre:YZERO?"
+        r: "0.0"
+      - q: "WFMOutpre:NR_PT?"
+        r: "200"
+      - q: "WFMOutpre:YUNit?"
+        r: '"V"'
+      # ASCII CURVe? — comma-separated integer codes for a 5-cycle sine (+/-200).
+      - q: "CURVe?"
+        r: "0,31,61,90,117,141,161,178,190,197,200,197,190,178,161,141,117,90,61,31,0,-31,-61,-90,-117,-141,-161,-178,-190,-197,-200,-197,-190,-178,-161,-141,-117,-90,-61,-31,0,31,61,90,117,141,161,178,190,197,200,197,190,178,161,141,117,90,61,31,0,-31,-61,-90,-117,-141,-161,-178,-190,-197,-200,-197,-190,-178,-161,-141,-117,-90,-61,-31,0,31,61,90,117,141,161,178,190,197,200,197,190,178,161,141,117,90,61,31,0,-31,-61,-90,-117,-141,-161,-178,-190,-197,-200,-197,-190,-178,-161,-141,-117,-90,-61,-31,0,31,61,90,117,141,161,178,190,197,200,197,190,178,161,141,117,90,61,31,0,-31,-61,-90,-117,-141,-161,-178,-190,-197,-200,-197,-190,-178,-161,-141,-117,-90,-61,-31,0,31,61,90,117,141,161,178,190,197,200,197,190,178,161,141,117,90,61,31,0,-31,-61,-90,-117,-141,-161,-178,-190,-197,-200,-197,-190,-178,-161,-141,-117,-90,-61,-31"
     # Stateful settings: every configure() write is STORED and can be queried back,
     # so a write->readback round-trip proves the command actually landed on the sim.
     # Values are stored verbatim as strings so the readback echoes exactly what was sent.
