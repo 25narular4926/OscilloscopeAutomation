@@ -1,22 +1,5 @@
 #!/usr/bin/env python3
-"""
-verify_sim_state.py — prove configure() actually lands on the (simulated) scope.
 
-Runs the real configure() path against the pyvisa-sim MSO44B, then queries every
-setting back and asserts the readback matches what was sent. Because the sim models
-each setting as a stateful property (see sim_mso44b.yaml), a matching readback proves
-the write reached the instrument — not just that the script emitted a string.
-
-This is the round-trip complement to `bench_configure.py --dry-run` (which only shows
-the SCPI that *would* be sent). No hardware required.
-
-Usage (run from the scripts/ folder):
-    python verify_sim_state.py
-
-Exit codes:
-    0  every setting stored and read back correctly
-    1  at least one setting did not round-trip
-"""
 from __future__ import annotations
 
 import os
