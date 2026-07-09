@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+
+# Scope-only bench entry point built on Tektronix's tm_devices driver.
+#
+# This is the "real hardware" path. Unlike the pyvisa-sim scripts in ../sim, it does
+# NOT run offline: tm_devices speaks real VISA (read_stb / device-clear / status-byte
+# semantics) that pyvisa-sim doesn't implement, so it needs TekVISA or NI-VISA and a
+# live MSO44B. add_scope() replaces the connect()/identify() we hand-wrote in ../sim.
+#
+# Only the scope is wired up for now — the AFG can be added later (the DeviceManager
+# already supports many instruments at once via add_afg()/add_psu()/...).
+#
+#   set SCOPE_RESOURCE=TCPIP0::192.168.0.10::INSTR
+#   python bench_scope.py --identify
+#   python bench_scope.py --capture --channel 1
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+from tm_devices import DeviceManager
+from tm_devices.drivers import MSO4B
+
+
+# ---------------------------------------------------------------------------
+# Connect: tm_devices auto-selects the MSO4B driver from *IDN? (the MSO44B
+# resolves to it), so add_scope() opens the session AND identifies in one call.
+# ---------------------------------------------------------------------------
+def open_scope(dm: DeviceManager, scope_resource: str) -> MSO4B:
+    """Add the oscilloscope and return its driver handle."""
+    return dm.add_scope(scope_resource, alias="scope")
+
+
+def identify(scope: MSO4B) -> None:
+    """Print the scope's identity — no manual *IDN? needed."""
+    print(f"[{scope.name}] {scope.idn_string.strip()}")
+    print(f"      model={scope.model}  channels={scope.total_channels}  "
+          f"resource={scope.resource_expression}")
+
+
+# ---------------------------------------------------------------------------
+# Capture: pull the current acquisition off a channel and summarise it.
+# curve_query returns the channel's samples as a list.
+# ---------------------------------------------------------------------------
+def capture(scope: MSO4B, channel: int) -> int:
+    print(f"Scope: curve query on CH{channel} ...")
+    curve = scope.curve_query(channel)
+    if not curve:
+        print("scope returned an empty curve", file=sys.stderr)
+        return 1
+
+    lo, hi = min(curve), max(curve)
+    print(f"  {len(curve)} points  span {lo} .. {hi}")
+    return 0
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Connect to the MSO44B via tm_devices and read from it.",
+    )
+    parser.add_argument("--scope-resource", default=None,
+                        help="Scope VISA resource (overrides SCOPE_RESOURCE).")
+    parser.add_argument("--identify", action="store_true",
+                        help="Connect and print the scope's identity, then exit.")
+    parser.add_argument("--capture", action="store_true",
+                        help="Read the current acquisition off a channel and summarise it.")
+    parser.add_argument("--channel", type=int, default=1,
+                        help="Channel number to read. Default: 1.")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+
+    scope_resource = args.scope_resource or os.environ.get("SCOPE_RESOURCE")
+    if not scope_resource:
+        print("No scope address. Set SCOPE_RESOURCE or pass --scope-resource.",
+              file=sys.stderr)
+        return 2
+
+    try:
+        # DeviceManager is a context manager: it closes the connection on exit.
+        with DeviceManager(verbose=False) as dm:
+            scope = open_scope(dm, scope_resource)
+            identify(scope)
+
+            if args.capture:
+                return capture(scope, args.channel)
+            return 0
+
+    except Exception as exc:  # tm_devices raises SystemError/VISA errors on bad connect
+        print(f"Error talking to the scope: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
