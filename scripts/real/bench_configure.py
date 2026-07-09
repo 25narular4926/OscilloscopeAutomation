@@ -25,11 +25,11 @@ from tm_devices import DeviceManager
 from tm_devices.drivers import MSO4B
 
 
-# ---------------------------------------------------------------------------
+
 # The requested setup and the applied record. Plain dataclasses keep this
 # script self-contained on tm_devices + stdlib (the pydantic config schema is
 # Phase 2's config/ module).
-# ---------------------------------------------------------------------------
+
 @dataclass
 class ScopeSetup:
     channel: str = "CH1"
