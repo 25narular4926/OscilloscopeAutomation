@@ -49,8 +49,17 @@ scope is wired up for now; the AFG is an additive `add_afg()` away.
 | `bench_configure-guide.md` | Walkthrough of `bench_configure.py`. |
 | `tm_devices-reference.md` | Reference for the `tm_devices` library functions (DeviceManager, drivers, SCPI tree). |
 
+Install its dependencies (on any machine) with the pinned requirements file:
+
 ```bat
 cd scripts\real
+python -m venv .venv && .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Then, with a live scope reachable:
+
+```bat
 set SCOPE_RESOURCE=TCPIP0::192.168.0.10::INSTR
 python bench_scope.py --identify
 python bench_scope.py --capture --channel 1

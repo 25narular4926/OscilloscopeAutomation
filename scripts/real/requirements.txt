@@ -1,0 +1,18 @@
+# Dependencies for the real/ (tm_devices) bench scripts.
+#
+#   python -m venv .venv
+#   .venv\Scripts\activate            # Windows   (source .venv/bin/activate on Linux/macOS)
+#   pip install -r requirements.txt
+#
+# tm_devices is the only direct dependency; it pulls in pyvisa, pyvisa-py, and the rest
+# of the connection stack automatically. Pinned to the version these scripts were built
+# and tested against.
+tm_devices==3.6.1
+
+# NOTE — VISA backend for REAL hardware:
+# tm_devices talks to instruments through VISA. For a live MSO44B over LAN/USB you need a
+# system VISA library that is NOT pip-installable — install one of:
+#   * TekVISA  (Tektronix OpenChoice deployment package), or
+#   * NI-VISA  (National Instruments).
+# pyvisa-py (installed above as a tm_devices dependency) is a pure-Python fallback backend,
+# but the ../sim pyvisa-sim path does NOT work with tm_devices — see ../README.md.

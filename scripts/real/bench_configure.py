@@ -1,15 +1,6 @@
 #!/usr/bin/env python3
 
-# Scope configuration on real hardware, via Tektronix's tm_devices driver.
-#
-# The tm_devices counterpart to ../sim/bench_configure.py. Same idea — apply
-# vertical / horizontal / trigger / transfer settings from a ScopeSetup — but instead
-# of hand-building SCPI strings it drives the driver's typed command tree
-# (scope.commands.*), each node of which maps 1:1 to the SCPI the sim script sends.
-#
-# tm_devices verifies every write against the instrument's error queue by default, so a
-# rejected setting raises instead of failing silently — no hand-written check_errors().
-#
+
 #   set SCOPE_RESOURCE=TCPIP0::192.168.0.10::INSTR
 #   python bench_configure.py
 
@@ -47,10 +38,26 @@ class ScopeSetup:
 
 
 @dataclass
+class Setting:
+  
+    label: str          # human/SCPI label, e.g. "CH1:SCAle"
+    expected: Any       # the value we wrote
+    node: Any           # the command leaf (has .write() / .query())
+
+
+@dataclass
 class AppliedState:
     channel: str
-    settings: dict[str, Any] = field(default_factory=dict)
+    settings: list[Setting] = field(default_factory=list)
     idn: str = ""
+
+
+@dataclass
+class CheckResult:
+    label: str
+    expected: Any
+    readback: str
+    ok: bool
 
 
 DEFAULT_SETUP = ScopeSetup(
@@ -73,63 +80,108 @@ def _channel_number(channel: str) -> int:
 
 
 def configure(scope: MSO4B, setup: ScopeSetup) -> AppliedState:
-    """Apply vertical/horizontal/trigger/transfer settings; return the applied record."""
+    """Apply vertical/horizontal/trigger/transfer settings; return the applied record.
+
+    Each write also records the command node it wrote to, so `verify()` can later read
+    every setting back off the instrument and confirm it landed.
+    """
     ch = setup.channel
     n = _channel_number(ch)
-    applied: dict[str, Any] = {}
-
-    def log(key: str, value: Any) -> None:
-        applied[key] = value
-
     cmds = scope.commands
+    settings: list[Setting] = []
+
+    def apply(node: Any, value: Any, label: str) -> None:
+        node.write(value)
+        settings.append(Setting(label, value, node))
 
     # Vertical.
     scope.turn_channel_on(ch)
-    log(f"{ch} display", "ON")
     if setup.vertical_scale is not None:
-        cmds.ch[n].scale.write(setup.vertical_scale)      # CH<n>:SCAle
-        log(f"{ch}:SCAle", setup.vertical_scale)
+        apply(cmds.ch[n].scale, setup.vertical_scale, f"{ch}:SCAle")
     if setup.vertical_offset is not None:
-        cmds.ch[n].offset.write(setup.vertical_offset)    # CH<n>:OFFSet
-        log(f"{ch}:OFFSet", setup.vertical_offset)
+        apply(cmds.ch[n].offset, setup.vertical_offset, f"{ch}:OFFSet")
     if setup.coupling:
-        cmds.ch[n].coupling.write(setup.coupling)         # CH<n>:COUPling
-        log(f"{ch}:COUPling", setup.coupling)
+        apply(cmds.ch[n].coupling, setup.coupling, f"{ch}:COUPling")
 
     # Horizontal.
     if setup.sample_rate:
-        cmds.horizontal.samplerate.write(setup.sample_rate)      # HORizontal:SAMPLERate
-        log("HORizontal:SAMPLERate", setup.sample_rate)
+        apply(cmds.horizontal.samplerate, setup.sample_rate, "HORizontal:SAMPLERate")
     if setup.horizontal_scale:
-        cmds.horizontal.scale.write(setup.horizontal_scale)      # HORizontal:SCAle
-        log("HORizontal:SCAle", setup.horizontal_scale)
+        apply(cmds.horizontal.scale, setup.horizontal_scale, "HORizontal:SCAle")
     if setup.record_length:
-        cmds.horizontal.recordlength.write(setup.record_length)  # HORizontal:RECOrdlength
-        log("HORizontal:RECOrdlength", setup.record_length)
+        apply(cmds.horizontal.recordlength, setup.record_length, "HORizontal:RECOrdlength")
 
-    # Trigger.
+    # Trigger (edge).
     if setup.trigger_source:
-        cmds.trigger.a.type.write("EDGE")                        # TRIGger:A:TYPe EDGE
-        cmds.trigger.a.edge.source.write(setup.trigger_source)   # TRIGger:A:EDGE:SOUrce
-        log("TRIGger:A:EDGE:SOUrce", setup.trigger_source)
+        apply(cmds.trigger.a.type, "EDGE", "TRIGger:A:TYPe")
+        apply(cmds.trigger.a.edge.source, setup.trigger_source, "TRIGger:A:EDGE:SOUrce")
         if setup.trigger_level is not None:
             tn = _channel_number(setup.trigger_source)
-            cmds.trigger.a.level.ch[tn].write(setup.trigger_level)  # TRIGger:A:LEVel:CH<tn>
-            log(f"TRIGger:A:LEVel:CH{tn}", setup.trigger_level)
+            apply(cmds.trigger.a.level.ch[tn], setup.trigger_level, f"TRIGger:A:LEVel:CH{tn}")
         if setup.trigger_slope:
-            cmds.trigger.a.edge.slope.write(setup.trigger_slope)    # TRIGger:A:EDGE:SLOpe
-            log("TRIGger:A:EDGE:SLOpe", setup.trigger_slope)
+            apply(cmds.trigger.a.edge.slope, setup.trigger_slope, "TRIGger:A:EDGE:SLOpe")
 
     # Waveform transfer window.
-    cmds.data.source.write(ch)                               # DATa:SOURce
-    cmds.data.encdg.write(setup.encoding)                    # DATa:ENCdg
-    cmds.data.width.write(setup.byte_width)                  # DATa:WIDth
-    cmds.data.start.write(1)                                 # DATa:STARt
-    cmds.data.stop.write(setup.record_length or 1_000_000)   # DATa:STOP
-    log("DATa:ENCdg", setup.encoding)
-    log("DATa:WIDth", setup.byte_width)
+    apply(cmds.data.source, ch, "DATa:SOURce")
+    apply(cmds.data.encdg, setup.encoding, "DATa:ENCdg")
+    apply(cmds.data.width, setup.byte_width, "DATa:WIDth")
+    apply(cmds.data.start, 1, "DATa:STARt")
+    apply(cmds.data.stop, setup.record_length or 1_000_000, "DATa:STOP")
 
-    return AppliedState(channel=ch, settings=applied, idn=scope.idn_string.strip())
+    return AppliedState(channel=ch, settings=settings, idn=scope.idn_string.strip())
+
+
+# the _matches comparator, 0.1% tolerance + tiny floor, so instrument formatting like 500.0000E-3 for 0.5 or 0.0E+0 for 0.0 still matches.
+# Strings: case-insensitive, accepts the scope's abbreviated echo (RIS for RISE).
+# gets you within an error
+def _matches(expected: Any, readback: str) -> bool:
+    """Compare a written value against its read-back, tolerant of instrument formatting."""
+    text = readback.strip().strip('"')
+    if isinstance(expected, (int, float)):
+        try:
+            got = float(text)
+        except ValueError:
+            return False
+        # 0.1% relative + a tiny absolute floor (handles 0.0 and exponent formatting).
+        return abs(got - float(expected)) <= 1e-9 + 1e-3 * abs(float(expected))
+
+    exp_s = str(expected).strip().strip('"').upper()
+    got_s = text.upper()
+    return exp_s == got_s or exp_s.startswith(got_s) or got_s.startswith(exp_s)
+
+
+def verify(scope: MSO4B, applied: AppliedState) -> list[CheckResult]:
+    """Query every applied setting back off the scope and compare it to what we wrote.
+
+    Most command leaves expose their own ``.query()``; a few (e.g. ``CH:SCAle``) are
+    modeled write-only, so fall back to a raw query built from the node's ``cmd_syntax``.
+    """
+    results: list[CheckResult] = []
+    for s in applied.settings:
+        try:
+            if hasattr(s.node, "query"):
+                readback = str(s.node.query()).strip()
+            else:
+                readback = str(scope.query(f"{s.node.cmd_syntax}?")).strip()
+            ok = _matches(s.expected, readback)
+        except Exception as exc:                    # a query that errors counts as a fail
+            readback, ok = f"<query error: {exc}>", False
+        results.append(CheckResult(s.label, s.expected, readback, ok))
+    return results
+
+
+def report(results: list[CheckResult]) -> bool:
+    """Print a PASS/FAIL table; return True only if every check passed."""
+    label_w = max((len(r.label) for r in results), default=0)
+    passed = sum(r.ok for r in results)
+    for r in results:
+        mark = "PASS" if r.ok else "FAIL"
+        print(f"  [{mark}] {r.label:<{label_w}}  set {str(r.expected):<12} "
+              f"readback {r.readback}")
+    total = len(results)
+    print(f"\n{passed}/{total} settings verified - "
+          f"{'ALL PASSED' if passed == total else 'SOME FAILED'}")
+    return passed == total
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -161,12 +213,12 @@ def main(argv: list[str] | None = None) -> int:
             print("IDN:", scope.idn_string.strip())
 
             applied = configure(scope, setup)
-            print(f"Applied {len(applied.settings)} settings to {applied.channel}.")
+            print(f"Applied {len(applied.settings)} settings to {applied.channel}. "
+                  f"Reading them back:\n")
 
-            # Read one setting back as a sanity check that the writes landed.
-            readback = scope.commands.horizontal.recordlength.query()
-            print("HORizontal:RECOrdlength? ->", readback)
-            return 0
+            # Read EVERY applied setting back off the scope and check it landed.
+            all_ok = report(verify(scope, applied))
+            return 0 if all_ok else 1
 
     except Exception as exc:  # tm_devices raises SystemError/VISA errors on bad connect
         print(f"Error configuring the scope: {type(exc).__name__}: {exc}",
