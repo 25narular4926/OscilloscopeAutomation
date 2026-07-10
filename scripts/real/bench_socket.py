@@ -223,9 +223,20 @@ def report(results: list[CheckResult]) -> bool:
 
 # ---------------------------------------------------------------------------
 # Capture — the same job as bench_scope.py --capture, over the socket. Pulls an
-# ASCII curve (comma-separated codes), applies the affine scaling, and summarises.
+# ASCII curve (comma-separated codes), applies the affine scaling, and can print
+# a summary, save the samples to CSV, or plot them (ASCII in-terminal, or a PNG).
 # ---------------------------------------------------------------------------
-def capture(scope: SocketScope, channel: int = 1, points: int = 1000) -> int:
+@dataclass
+class Waveform:
+    channel: str
+    t: list[float]      # seconds
+    v: list[float]      # volts
+    dt: float
+    t0: float
+
+
+def acquire(scope: SocketScope, channel: int = 1, points: int = 1000) -> Waveform | None:
+    """Pull an ASCII curve off a channel and scale it to a Waveform (None if empty)."""
     source = f"CH{channel}"
     scope.write(f"DATa:SOURce {source}")
     scope.write("DATa:ENCdg ASCii")          # ASCII so the curve comes back as text
@@ -251,18 +262,94 @@ def capture(scope: SocketScope, channel: int = 1, points: int = 1000) -> int:
         except ValueError:
             pass  # skip any Terminal-mode echo/prompt stragglers
     if not codes:
+        return None
+
+    v = [(c - yoff) * ymult + yzero for c in codes]
+    t = [xzero + (i - pt_off) * xincr for i in range(len(v))]
+    return Waveform(source, t, v, xincr, t[0])
+
+
+def summarize(wf: Waveform) -> None:
+    vmin, vmax = min(wf.v), max(wf.v)
+    print(f"Waveform: {len(wf.v)} samples on {wf.channel}")
+    print(f"  dt   = {wf.dt:g} s   t0 = {wf.t0:g} s")
+    print(f"  span = {wf.t[0]:g} .. {wf.t[-1]:g} s")
+    print(f"  Vpp  = {vmax - vmin:g} V  (min {vmin:g}, max {vmax:g})")
+
+
+def save_csv(wf: Waveform, path: str) -> None:
+    """Write the scaled waveform as CSV: index, time_s, volts."""
+    import csv
+    with open(path, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["index", "time_s", "volts"])
+        for i, (t, v) in enumerate(zip(wf.t, wf.v)):
+            writer.writerow([i, f"{t:.9g}", f"{v:.6g}"])
+    print(f"saved {len(wf.v)} samples to {path}")
+
+
+def ascii_plot(wf: Waveform, width: int = 70, height: int = 21) -> None:
+    """Draw a simple ASCII plot of the waveform in the terminal (no libraries)."""
+    v, n = wf.v, len(wf.v)
+    vmin, vmax = min(v), max(v)
+    span = (vmax - vmin) or 1.0
+    grid = [[" "] * width for _ in range(height)]
+
+    # zero line first, so samples draw over it
+    if vmin <= 0 <= vmax:
+        zrow = round((vmax - 0.0) / span * (height - 1))
+        grid[zrow] = ["-"] * width
+
+    for col in range(width):
+        idx = round(col * (n - 1) / (width - 1)) if width > 1 else 0
+        row = round((vmax - v[idx]) / span * (height - 1))
+        grid[row][col] = "*"
+
+    # ASCII only (the Windows console can't render box-drawing characters).
+    print(f"  {vmax:+.3g} V +" + "-" * width)
+    for r in grid:
+        print("           |" + "".join(r))
+    print(f"  {vmin:+.3g} V +" + "-" * width)
+    print(f"             {wf.t[0]:g} s{' ' * max(1, width - 14)}{wf.t[-1]:g} s")
+
+
+def save_png(wf: Waveform, path: str) -> bool:
+    """Save a PNG plot via matplotlib if it's installed; otherwise say so."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib not installed - skipping PNG. Install it with "
+              "'pip install matplotlib', or use --plot for an ASCII plot.",
+              file=sys.stderr)
+        return False
+    plt.figure(figsize=(9, 4))
+    plt.plot(wf.t, wf.v, linewidth=0.8)
+    plt.xlabel("time (s)")
+    plt.ylabel("volts")
+    plt.title(f"{wf.channel} capture ({len(wf.v)} samples)")
+    plt.grid(True, alpha=0.3)
+    plt.savefig(path, dpi=110, bbox_inches="tight")
+    plt.close()
+    print(f"saved plot to {path}")
+    return True
+
+
+def capture(scope: SocketScope, channel: int = 1, points: int = 1000, *,
+            save: str | None = None, plot: bool = False,
+            plot_png: str | None = None) -> int:
+    wf = acquire(scope, channel, points)
+    if wf is None:
         print("no curve data returned (is a signal being acquired?)", file=sys.stderr)
         return 1
-
-    volts = [(c - yoff) * ymult + yzero for c in codes]
-    n = len(volts)
-    t0 = xzero + (0 - pt_off) * xincr
-    vmin, vmax = min(volts), max(volts)
-
-    print(f"Waveform: {n} samples on {source}")
-    print(f"  dt   = {xincr:g} s   t0 = {t0:g} s")
-    print(f"  span = {t0:g} .. {t0 + (n - 1) * xincr:g} s")
-    print(f"  Vpp  = {vmax - vmin:g} V  (min {vmin:g}, max {vmax:g})")
+    summarize(wf)
+    if save:
+        save_csv(wf, save)
+    if plot:
+        ascii_plot(wf)
+    if plot_png:
+        save_png(wf, plot_png)
     return 0
 
 
@@ -284,6 +371,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Channel number for --configure/--capture. Default: 1.")
     parser.add_argument("--points", type=int, default=1000,
                         help="Number of samples to transfer for --capture. Default: 1000.")
+    parser.add_argument("--save", metavar="CSV", default=None,
+                        help="With --capture: save the waveform to a CSV file (index, time, volts).")
+    parser.add_argument("--plot", action="store_true",
+                        help="With --capture: draw an ASCII plot in the terminal (no libraries).")
+    parser.add_argument("--plot-png", metavar="PNG", default=None,
+                        help="With --capture: save a PNG plot (needs matplotlib).")
     parser.add_argument("--query", metavar="SCPI", default=None,
                         help="Send an arbitrary SCPI query and print the reply.")
     parser.add_argument("--debug", action="store_true",
@@ -302,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         scope = SocketScope(host, args.port)
     except OSError as exc:
-        print(f"Could not connect to {host}:{args.port} — {exc}", file=sys.stderr)
+        print(f"Could not connect to {host}:{args.port} - {exc}", file=sys.stderr)
         print("Is the scope's Socket Server ON (Protocol = Terminal) on that port?",
               file=sys.stderr)
         return 1
@@ -319,7 +412,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Applied {len(applied)} settings to {setup.channel}. Reading them back:\n")
             return 0 if report(verify(scope, applied)) else 1
         if args.capture:
-            return capture(scope, args.channel, args.points)
+            return capture(scope, args.channel, args.points,
+                           save=args.save, plot=args.plot, plot_png=args.plot_png)
         # default action is identify
         print("IDN:", scope.query("*IDN?", debug=args.debug))
         return 0
