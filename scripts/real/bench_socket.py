@@ -8,10 +8,19 @@
 #   Enabled via Protocol = Terminal (Protocol "None" leaves the port closed), Port 4000.
 # Terminal mode echoes commands / adds a prompt, so replies are cleaned below.
 #
-# Text SCPI only (identify / queries). Binary curve transfer is NOT handled here.
+# Capabilities (the same shape as bench_scope.py + bench_configure.py, but over the
+# socket instead of tm_devices):
+#   --identify   *IDN?  ->  the scope's identity
+#   --configure  apply a ScopeSetup (vertical/horizontal/trigger/transfer) then read
+#                every setting back and print a PASS/FAIL table
+#   --capture    pull a waveform as ASCII (comma-separated codes), scale it, summarise
+#   --query      send any text SCPI query
+# Capture uses ASCII encoding (not binary) so the curve round-trips through the
+# Terminal-mode socket — the same approach the ../sim scripts use.
 #
 #   python bench_socket.py --host 169.254.8.134 --identify
-#   python bench_socket.py --host 169.254.8.134 --query "HORizontal:RECOrdlength?"
+#   python bench_socket.py --host 169.254.8.134 --configure
+#   python bench_socket.py --host 169.254.8.134 --capture --channel 1
 
 from __future__ import annotations
 
@@ -20,6 +29,8 @@ import os
 import socket
 import sys
 import time
+from dataclasses import dataclass
+from typing import Any
 
 
 class SocketScope:
@@ -80,6 +91,181 @@ def _clean(raw: str, cmd: str) -> str:
     return lines[-1] if lines else ""
 
 
+# ---------------------------------------------------------------------------
+# Configure — the same job as bench_configure.py, over the socket. Sends the
+# standard Tek SCPI writes, then reads every setting back and checks it landed.
+# ---------------------------------------------------------------------------
+@dataclass
+class ScopeSetup:
+    channel: str = "CH1"
+    vertical_scale: float | None = None      # volts/div
+    vertical_offset: float | None = None     # volts
+    coupling: str | None = None              # DC | AC | DCREJ
+    sample_rate: float | None = None         # samples/s
+    horizontal_scale: float | None = None    # seconds/div
+    record_length: int | None = None
+    trigger_source: str | None = None
+    trigger_level: float | None = None       # volts
+    trigger_slope: str | None = None         # RISE | FALL
+
+
+DEFAULT_SETUP = ScopeSetup(
+    channel="CH1",
+    vertical_scale=0.5,
+    vertical_offset=0.0,
+    coupling="DC",
+    sample_rate=1.25e9,
+    record_length=100_000,
+    trigger_source="CH1",
+    trigger_level=1.0,
+    trigger_slope="RISE",
+)
+
+
+@dataclass
+class Setting:
+    label: str        # the SCPI header, e.g. "CH1:SCAle"
+    expected: Any     # the value we wrote
+    query: str        # the query to read it back, e.g. "CH1:SCAle?"
+
+
+@dataclass
+class CheckResult:
+    label: str
+    expected: Any
+    readback: str
+    ok: bool
+
+
+def _channel_number(channel: str) -> int:
+    digits = "".join(c for c in channel if c.isdigit())
+    return int(digits) if digits else 1
+
+
+def configure(scope: SocketScope, setup: ScopeSetup) -> list[Setting]:
+    """Apply vertical/horizontal/trigger/transfer settings; return what was applied."""
+    ch = setup.channel
+    settings: list[Setting] = []
+
+    def apply(base: str, value: Any) -> None:
+        scope.write(f"{base} {value}")
+        settings.append(Setting(base, value, f"{base}?"))
+
+    # Vertical.
+    scope.write(f"SELect:{ch} ON")
+    if setup.vertical_scale is not None:
+        apply(f"{ch}:SCAle", setup.vertical_scale)
+    if setup.vertical_offset is not None:
+        apply(f"{ch}:OFFSet", setup.vertical_offset)
+    if setup.coupling:
+        apply(f"{ch}:COUPling", setup.coupling)
+
+    # Horizontal.
+    if setup.sample_rate:
+        apply("HORizontal:SAMPLERate", setup.sample_rate)
+    if setup.horizontal_scale:
+        apply("HORizontal:SCAle", setup.horizontal_scale)
+    if setup.record_length:
+        apply("HORizontal:RECOrdlength", setup.record_length)
+
+    # Trigger (edge).
+    if setup.trigger_source:
+        apply("TRIGger:A:TYPe", "EDGE")
+        apply("TRIGger:A:EDGE:SOUrce", setup.trigger_source)
+        if setup.trigger_level is not None:
+            tn = _channel_number(setup.trigger_source)
+            apply(f"TRIGger:A:LEVel:CH{tn}", setup.trigger_level)
+        if setup.trigger_slope:
+            apply("TRIGger:A:EDGE:SLOpe", setup.trigger_slope)
+
+    return settings
+
+
+def _matches(expected: Any, readback: str) -> bool:
+    """Compare a written value against its read-back, tolerant of formatting."""
+    text = readback.strip().strip('"')
+    if isinstance(expected, (int, float)):
+        try:
+            got = float(text)
+        except ValueError:
+            return False
+        return abs(got - float(expected)) <= 1e-9 + 1e-3 * abs(float(expected))
+    exp_s = str(expected).strip().strip('"').upper()
+    got_s = text.upper()
+    return exp_s == got_s or exp_s.startswith(got_s) or got_s.startswith(exp_s)
+
+
+def verify(scope: SocketScope, settings: list[Setting]) -> list[CheckResult]:
+    """Read every applied setting back off the scope and compare it to what we wrote."""
+    results: list[CheckResult] = []
+    for s in settings:
+        readback = scope.query(s.query)
+        results.append(CheckResult(s.label, s.expected, readback, _matches(s.expected, readback)))
+    return results
+
+
+def report(results: list[CheckResult]) -> bool:
+    """Print a PASS/FAIL table; return True only if every check passed."""
+    if not results:
+        print("no settings to verify")
+        return True
+    label_w = max(len(r.label) for r in results)
+    passed = sum(r.ok for r in results)
+    for r in results:
+        mark = "PASS" if r.ok else "FAIL"
+        print(f"  [{mark}] {r.label:<{label_w}}  set {str(r.expected):<12} "
+              f"readback {r.readback}")
+    total = len(results)
+    print(f"\n{passed}/{total} settings verified - "
+          f"{'ALL PASSED' if passed == total else 'SOME FAILED'}")
+    return passed == total
+
+
+# ---------------------------------------------------------------------------
+# Capture — the same job as bench_scope.py --capture, over the socket. Pulls an
+# ASCII curve (comma-separated codes), applies the affine scaling, and summarises.
+# ---------------------------------------------------------------------------
+def capture(scope: SocketScope, channel: int = 1, points: int = 1000) -> int:
+    source = f"CH{channel}"
+    scope.write(f"DATa:SOURce {source}")
+    scope.write("DATa:ENCdg ASCii")          # ASCII so the curve comes back as text
+    scope.write("DATa:STARt 1")
+    scope.write(f"DATa:STOP {points}")
+
+    def qf(field: str) -> float:
+        return float(scope.query(f"WFMOutpre:{field}?"))
+
+    xincr = qf("XINCR")
+    xzero = qf("XZERO")
+    pt_off = int(qf("PT_OFF"))
+    ymult = qf("YMULT")
+    yoff = qf("YOFF")
+    yzero = qf("YZERO")
+
+    raw = scope.query("CURVe?")
+    codes: list[float] = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        try:
+            codes.append(float(tok))
+        except ValueError:
+            pass  # skip any Terminal-mode echo/prompt stragglers
+    if not codes:
+        print("no curve data returned (is a signal being acquired?)", file=sys.stderr)
+        return 1
+
+    volts = [(c - yoff) * ymult + yzero for c in codes]
+    n = len(volts)
+    t0 = xzero + (0 - pt_off) * xincr
+    vmin, vmax = min(volts), max(volts)
+
+    print(f"Waveform: {n} samples on {source}")
+    print(f"  dt   = {xincr:g} s   t0 = {t0:g} s")
+    print(f"  span = {t0:g} .. {t0 + (n - 1) * xincr:g} s")
+    print(f"  Vpp  = {vmax - vmin:g} V  (min {vmin:g}, max {vmax:g})")
+    return 0
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Talk to the MSO44B over its raw Socket Server (no VISA needed).",
@@ -90,6 +276,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Socket Server port. Default: 4000.")
     parser.add_argument("--identify", action="store_true",
                         help="Query *IDN? and print the scope's identity (the default).")
+    parser.add_argument("--configure", action="store_true",
+                        help="Apply DEFAULT_SETUP and print a read-back PASS/FAIL table.")
+    parser.add_argument("--capture", action="store_true",
+                        help="Pull an ASCII waveform off a channel and summarise it.")
+    parser.add_argument("--channel", type=int, default=1,
+                        help="Channel number for --configure/--capture. Default: 1.")
+    parser.add_argument("--points", type=int, default=1000,
+                        help="Number of samples to transfer for --capture. Default: 1000.")
     parser.add_argument("--query", metavar="SCPI", default=None,
                         help="Send an arbitrary SCPI query and print the reply.")
     parser.add_argument("--debug", action="store_true",
@@ -116,8 +310,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.query:
             print(scope.query(args.query, debug=args.debug))
-        else:  # default action is identify
-            print("IDN:", scope.query("*IDN?", debug=args.debug))
+            return 0
+        if args.configure:
+            setup = DEFAULT_SETUP
+            setup.channel = f"CH{args.channel}"
+            print("IDN:", scope.query("*IDN?"))
+            applied = configure(scope, setup)
+            print(f"Applied {len(applied)} settings to {setup.channel}. Reading them back:\n")
+            return 0 if report(verify(scope, applied)) else 1
+        if args.capture:
+            return capture(scope, args.channel, args.points)
+        # default action is identify
+        print("IDN:", scope.query("*IDN?", debug=args.debug))
         return 0
     finally:
         scope.close()
