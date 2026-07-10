@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import socket
 import sys
 import time
@@ -69,6 +70,13 @@ class SocketScope:
         if debug:
             print(f"  raw reply: {raw!r}", file=sys.stderr)
         return _clean(raw, cmd)
+
+    def query_raw(self, cmd: str) -> str:
+        """Return the FULL reply, uncleaned — for big replies (a curve) that may
+        arrive wrapped across many lines in Terminal mode."""
+        self.sock.sendall(cmd.encode() + b"\n")
+        time.sleep(0.2)
+        return self._read()
 
     def write(self, cmd: str) -> None:
         self.sock.sendall(cmd.encode() + b"\n")
@@ -253,14 +261,19 @@ def acquire(scope: SocketScope, channel: int = 1, points: int = 1000) -> Wavefor
     yoff = qf("YOFF")
     yzero = qf("YZERO")
 
-    raw = scope.query("CURVe?")
+    # Read the curve RAW (not line-cleaned): a big ASCII curve can arrive wrapped
+    # across many lines in Terminal mode. Drop the echoed command, then strip ALL
+    # whitespace before splitting on commas — that heals numbers split across a
+    # wrap boundary (e.g. "18\n0" -> "180") and removes any trailing prompt.
+    raw = scope.query_raw("CURVe?")
+    raw = re.sub(r"(?i)curve\?", "", raw)          # drop echoed command
+    raw = re.sub(r"[^0-9eE+.\-,]", "", raw)        # keep only number/comma chars
     codes: list[float] = []
     for tok in raw.split(","):
-        tok = tok.strip()
         try:
             codes.append(float(tok))
         except ValueError:
-            pass  # skip any Terminal-mode echo/prompt stragglers
+            pass
     if not codes:
         return None
 
