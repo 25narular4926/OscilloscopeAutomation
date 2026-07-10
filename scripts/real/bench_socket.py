@@ -302,21 +302,31 @@ def save_csv(wf: Waveform, path: str) -> None:
 
 
 def ascii_plot(wf: Waveform, width: int = 70, height: int = 21) -> None:
-    """Draw a simple ASCII plot of the waveform in the terminal (no libraries)."""
+    """Draw an ASCII plot of the waveform in the terminal (no libraries).
+
+    Each column shows the min..max of EVERY sample that falls in it (a vertical bar),
+    so the plot reaches the true peaks and matches the capture's Vpp exactly — no
+    aliasing from skipping samples. The y-axis spans the capture's actual min/max.
+    """
     v, n = wf.v, len(wf.v)
     vmin, vmax = min(v), max(v)
     span = (vmax - vmin) or 1.0
     grid = [[" "] * width for _ in range(height)]
 
+    def row_of(val: float) -> int:
+        return max(0, min(height - 1, round((vmax - val) / span * (height - 1))))
+
     # zero line first, so samples draw over it
     if vmin <= 0 <= vmax:
-        zrow = round((vmax - 0.0) / span * (height - 1))
-        grid[zrow] = ["-"] * width
+        grid[row_of(0.0)] = ["-"] * width
 
     for col in range(width):
-        idx = round(col * (n - 1) / (width - 1)) if width > 1 else 0
-        row = round((vmax - v[idx]) / span * (height - 1))
-        grid[row][col] = "*"
+        lo = col * n // width
+        hi = max(lo + 1, (col + 1) * n // width)
+        seg = v[lo:hi]
+        top, bot = row_of(max(seg)), row_of(min(seg))   # min..max of this column's samples
+        for r in range(top, bot + 1):
+            grid[r][col] = "*"
 
     # ASCII only (the Windows console can't render box-drawing characters).
     print(f"  {vmax:+.3g} V +" + "-" * width)
