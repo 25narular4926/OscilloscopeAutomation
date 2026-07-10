@@ -1,0 +1,46 @@
+[2026-07-10 11:12:07.544945] [tm_devices] [   DEBUG] timezone==America/New_York
+[2026-07-10 11:12:07.547159] [tm_devices] [   DEBUG] tm_devices==3.6.1
+[2026-07-10 11:12:07.547388] [tm_devices] [    INFO] Opening DeviceManager
+[2026-07-10 11:12:07.947052] [tm_devices] [    INFO] DeviceManager Closed
+[2026-07-10 11:12:07.947488] [tm_devices] [CRITICAL] Unable to query local resources, ensure you have a suitable VISA backend properly installed (NI-VISA is recommended) or specify STANDALONE in your config file.
+
+An uncaught exception occurred. If the exception was explicitly raised by the tm_devices package, look for the most recent previous ERROR log entry above to see the specific timestamp of the exception. Otherwise, use the traceback to debug the issue.
+
+Traceback (most recent call last):
+  File "C:\Users\25nar\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\tm_devices\device_manager.py", line 859, in get_available_devices
+    found_devices["local"] = resource_manager.list_resources()
+                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\25nar\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\pyvisa\highlevel.py", line 3145, in list_resources
+    return self.visalib.list_resources(self.session, query)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\25nar\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\pyvisa\ctwrapper\highlevel.py", line 297, in list_resources
+    raise e
+  File "C:\Users\25nar\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\pyvisa\ctwrapper\highlevel.py", line 291, in list_resources
+    ) = self._find_resources(  # type: ignore
+        ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+        session, query
+        ^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\25nar\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\pyvisa\ctwrapper\functions.py", line 783, in _find_resources
+    ret = library.viFindRsrc(
+        session, query, byref(find_list), byref(return_counter), instrument_description
+    )
+  File "C:\Users\25nar\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\pyvisa\ctwrapper\highlevel.py", line 227, in _return_handler
+    return self.handle_return_value(session, ret_value)  # type: ignore
+           ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\25nar\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\pyvisa\highlevel.py", line 252, in handle_return_value
+    raise errors.VisaIOError(rv)
+pyvisa.errors.VisaIOError: VI_ERROR_INV_OBJECT (-1073807346): The given session or object reference is invalid.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    from tm_devices import print_available_visa_devices; print_available_visa_devices()
+                                                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\25nar\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\tm_devices\device_manager.py", line 1607, in print_available_visa_devices
+    available_devices = dm.get_available_devices()
+  File "C:\Users\25nar\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\tm_devices\device_manager.py", line 866, in get_available_devices
+    raise AssertionError(msg) from exc
+AssertionError: Unable to query local resources, ensure you have a suitable VISA backend properly installed (NI-VISA is recommended) or specify STANDALONE in your config file.

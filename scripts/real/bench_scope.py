@@ -58,6 +58,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Read the current acquisition off a channel and summarise it.")
     parser.add_argument("--channel", type=int, default=1,
                         help="Channel number to read. Default: 1.")
+    parser.add_argument("--standalone", action="store_true",
+                        help="Force the PyVISA-py backend (@py) — use on a machine with "
+                             "no full VISA (e.g. LAN over VXI-11 with only pyvisa-py).")
     return parser.parse_args(argv)
 
 
@@ -74,6 +77,9 @@ def main(argv: list[str] | None = None) -> int:
         # DeviceManager is a context manager: it closes the connection on exit.
         # currently verbose is off so we don't get any tm_devices clutter. If you want to see the SCPI traffic turn verbose On
         with DeviceManager(verbose=False) as dm:
+            # Force PyVISA-py when there's no full VISA on this machine (LAN/VXI-11).
+            if args.standalone:
+                dm.visa_library = "@py"
             scope = open_scope(dm, scope_resource)
             identify(scope)
 
