@@ -1,18 +1,83 @@
-# Dependencies for the real/ (tm_devices) bench scripts.
+# =============================================================================
+# requirements.txt  —  scripts/real  (the tm_devices "real hardware" path)
+# =============================================================================
+# Takes a COMPLETELY FRESH machine to a working install that can run every script
+# in scripts/real. Read this once top to bottom: the only pip-installable lines
+# are the two near the bottom (tm_devices and matplotlib); everything above them
+# is the surrounding setup a bare machine needs.
 #
+# -----------------------------------------------------------------------------
+# STEP 0 — Python
+# -----------------------------------------------------------------------------
+# Install Python 3.11 or newer (built and tested on 3.13) from
+#   https://www.python.org/downloads/
+# On Windows, TICK "Add python.exe to PATH" during install. Verify:
+#   python --version
+#
+# -----------------------------------------------------------------------------
+# STEP 1 — Virtual environment (recommended, keeps this isolated)
+# -----------------------------------------------------------------------------
+# Windows (PowerShell):
+#   cd scripts\real
 #   python -m venv .venv
-#   .venv\Scripts\activate            # Windows   (source .venv/bin/activate on Linux/macOS)
-#   pip install -r requirements.txt
+#   .\.venv\Scripts\Activate.ps1
+#   # If activation is blocked by execution policy, skip it and just call the venv
+#   # Python directly everywhere below:  .\.venv\Scripts\python.exe ...
 #
-# tm_devices is the only direct dependency; it pulls in pyvisa, pyvisa-py, and the rest
-# of the connection stack automatically. Pinned to the version these scripts were built
-# and tested against.
+# Linux / macOS:
+#   cd scripts/real
+#   python3 -m venv .venv
+#   source .venv/bin/activate
+#
+# -----------------------------------------------------------------------------
+# STEP 2 — Install the pip packages in this file
+# -----------------------------------------------------------------------------
+#   python -m pip install --upgrade pip
+#   python -m pip install -r requirements.txt
+#
+# -----------------------------------------------------------------------------
+# STEP 3 — Install a VISA backend  (NOT pip-installable; needed for tm_devices)
+# -----------------------------------------------------------------------------
+# tm_devices (bench_scope.py, bench_configure.py) reaches instruments through a
+# SYSTEM VISA library. Install exactly ONE of these — do NOT install both, they
+# register conflicting DLLs:
+#   * NI-VISA  (recommended: cross-platform, robust HiSLIP/VXI-11)
+#       https://www.ni.com/en/support/downloads/drivers/download.ni-visa.html
+#   * TekVISA  (Tektronix OpenChoice package; Windows / all-Tektronix bench)
+#       use version >= 4.2.0
+# Reboot after installing, then verify VISA has a working backend:
+#   python -c "import pyvisa; rm=pyvisa.ResourceManager(); print(rm.visalib); print(rm.list_resources())"
+# (should print a VISA library path and NOT raise an error)
+#
+# bench_socket.py needs NO VISA — it talks to the scope's raw Socket Server using
+# only the Python standard library. It's the fallback for when VISA/LAN won't
+# cooperate. Only its optional --plot-png output needs matplotlib (see below).
+#
+# =============================================================================
+# STEP 4 — verify it all works
+# =============================================================================
+#   tm_devices path (needs VISA + a reachable scope):
+#     set SCOPE_RESOURCE=TCPIP0::<scope-ip>::INSTR   (Windows;  export ... on Unix)
+#     python bench_scope.py --identify
+#   no-VISA socket path (needs the scope's Socket Server ON):
+#     python bench_socket.py --host <scope-ip> --identify
+#
+# =============================================================================
+# PIP PACKAGES  (pinned to the versions these scripts were verified against)
+# =============================================================================
+
+# --- Core -------------------------------------------------------------------
+# tm_devices: Tektronix's device-management driver, used by bench_scope.py and
+# bench_configure.py. This ONE package pulls in the entire connection stack
+# automatically, so you do not list those yourself. Notable ones it installs:
+#     pyvisa      1.16.2   (VISA API layer)
+#     pyvisa-py   0.8.1    (pure-Python VISA backend / LAN fallback)
+#     pyusb, pyserial, zeroconf, psutil, pyvisa-sim, ...
 tm_devices==3.6.1
 
-# NOTE — VISA backend for REAL hardware:
-# tm_devices talks to instruments through VISA. For a live MSO44B over LAN/USB you need a
-# system VISA library that is NOT pip-installable — install one of:
-#   * TekVISA  (Tektronix OpenChoice deployment package), or
-#   * NI-VISA  (National Instruments).
-# pyvisa-py (installed above as a tm_devices dependency) is a pure-Python fallback backend,
-# but the ../sim pyvisa-sim path does NOT work with tm_devices — see ../README.md.
+# --- Optional ---------------------------------------------------------------
+# matplotlib: ONLY needed for  bench_socket.py --plot-png  (save a PNG graph).
+# Not required for --plot (ASCII, in-terminal) or --save (CSV) — both of those,
+# and all of bench_socket.py's other features, are pure standard library.
+# Remove this line if you never need PNG output.
+matplotlib==3.10.6
