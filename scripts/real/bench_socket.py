@@ -134,6 +134,12 @@ class ScopeSetup:
     # Acquisition — GLOBAL. SAMple is the plain "Sample" mode in the Acquisition badge.
     acquire_mode: str | None = None          # SAMple | PEAKdetect | HIRes | AVErage | ENVelope
     # Trigger — GLOBAL to the scope, sent once.
+    # MODE matters a lot for single-shot capture:
+    #   AUTO   - if no trigger arrives, the scope triggers ANYWAY after a timeout, so an
+    #            acquisition can complete WITHOUT your event ever happening.
+    #   NORMal - the scope waits indefinitely for the real trigger condition. This is
+    #            what you want when arming with --single to catch a specific event.
+    trigger_mode: str | None = None          # AUTO | NORMal
     trigger_source: str | None = None
     trigger_level: float | None = None       # volts
     trigger_slope: str | None = None         # RISE | FALL
@@ -191,6 +197,9 @@ SETUPS: dict[str, ScopeSetup] = {
     #
     # Not set here (not shown in the badges / no reliable SCPI):
     #   - vertical offset (not on the badge, so we leave it alone)
+
+    # python bench_socket.py --host 169.254.8.134 --capture --single --channels 1,2 --points 10000 --save wave.csv --plot-png wave.png --timeout 180
+
     #   - "12 bits" ADC resolution and "1 Acqs" (informational)
     # ---------------------------------------------------------------------
     "bench_full": ScopeSetup(
@@ -207,6 +216,9 @@ SETUPS: dict[str, ScopeSetup] = {
         record_length=10_000,         # RL: 10 kpts
         horizontal_position=10.0,     # 10%
         acquire_mode="SAMple",        # "Sample" in the Acquisition badge
+        # NORMal, not AUTO: in AUTO the scope force-triggers after a timeout, so a
+        # --single acquisition can complete without your event ever occurring.
+        trigger_mode="NORMal",
         trigger_source="CH1",
         trigger_level=6.8,
         trigger_slope="RISE",         # the falling-edge icon on the Trigger badge
@@ -287,6 +299,10 @@ def configure(scope: SocketScope, setup: ScopeSetup,
         apply("ACQuire:MODe", setup.acquire_mode)
 
     # Trigger (edge) — global, sent once.
+    if setup.trigger_mode:
+        # NORMal = wait for the real trigger. AUTO = fire anyway after a timeout,
+        # which lets an acquisition complete without your event ever happening.
+        apply("TRIGger:A:MODe", setup.trigger_mode)
     if setup.trigger_source:
         apply("TRIGger:A:TYPe", "EDGE")
         apply("TRIGger:A:EDGE:SOUrce", setup.trigger_source)
@@ -587,6 +603,15 @@ def arm_single(scope: SocketScope, timeout: float = 120.0, poll: float = 0.5) ->
     ACQuire:STATE? until it reports stopped. Returns False if it never completed
     within `timeout` (i.e. the trigger never fired).
     """
+    # In AUTO mode the scope force-triggers after a timeout, so the acquisition would
+    # complete even if your event never happened. Warn loudly - this is a trap.
+    mode = scope.query("TRIGger:A:MODe?").strip().upper()
+    if mode.startswith("AUTO"):
+        print("WARNING: trigger mode is AUTO. The scope will trigger by itself after a\n"
+              "         timeout, so the capture may complete WITHOUT your event.\n"
+              "         Use a setup with trigger_mode='NORMal' (e.g. --setup bench_full),\n"
+              "         or send: --query \"TRIGger:A:MODe NORMal\"", file=sys.stderr)
+
     scope.write("ACQuire:STOPAfter SEQuence")   # one shot, do not free-run
     scope.write("ACQuire:STATE RUN")            # arm it
     start = time.monotonic()
