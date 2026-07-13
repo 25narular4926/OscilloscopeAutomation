@@ -150,25 +150,34 @@ def _channel_number(channel: str) -> int:
     return int(digits) if digits else 1
 
 
-def configure(scope: SocketScope, setup: ScopeSetup) -> list[Setting]:
-    """Apply vertical/horizontal/trigger/transfer settings; return what was applied."""
-    ch = setup.channel
+def configure(scope: SocketScope, setup: ScopeSetup,
+              channels: list[int] | None = None) -> list[Setting]:
+    """Apply vertical/horizontal/trigger settings; return what was applied.
+
+    Vertical settings (scale/offset/coupling) are PER-CHANNEL, so they're applied to
+    every channel in `channels`. Horizontal and trigger settings are GLOBAL to the
+    scope, so they're sent once regardless of how many channels are listed.
+    """
+    if channels is None:
+        channels = [_channel_number(setup.channel)]
     settings: list[Setting] = []
 
     def apply(base: str, value: Any) -> None:
         scope.write(f"{base} {value}")
         settings.append(Setting(base, value, f"{base}?"))
 
-    # Vertical.
-    scope.write(f"SELect:{ch} ON")
-    if setup.vertical_scale is not None:
-        apply(f"{ch}:SCAle", setup.vertical_scale)
-    if setup.vertical_offset is not None:
-        apply(f"{ch}:OFFSet", setup.vertical_offset)
-    if setup.coupling:
-        apply(f"{ch}:COUPling", setup.coupling)
+    # Vertical — per channel.
+    for n in channels:
+        ch = f"CH{n}"
+        scope.write(f"SELect:{ch} ON")
+        if setup.vertical_scale is not None:
+            apply(f"{ch}:SCAle", setup.vertical_scale)
+        if setup.vertical_offset is not None:
+            apply(f"{ch}:OFFSet", setup.vertical_offset)
+        if setup.coupling:
+            apply(f"{ch}:COUPling", setup.coupling)
 
-    # Horizontal.
+    # Horizontal — global, sent once.
     if setup.sample_rate:
         apply("HORizontal:SAMPLERate", setup.sample_rate)
     if setup.horizontal_scale:
@@ -176,7 +185,7 @@ def configure(scope: SocketScope, setup: ScopeSetup) -> list[Setting]:
     if setup.record_length:
         apply("HORizontal:RECOrdlength", setup.record_length)
 
-    # Trigger (edge).
+    # Trigger (edge) — global, sent once.
     if setup.trigger_source:
         apply("TRIGger:A:TYPe", "EDGE")
         apply("TRIGger:A:EDGE:SOUrce", setup.trigger_source)
@@ -544,22 +553,24 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
 
+    # --channels (e.g. "1,2") wins; otherwise fall back to the single --channel.
+    if args.channels:
+        channels = [int(c) for c in args.channels.split(",") if c.strip()]
+    else:
+        channels = [args.channel]
+
     try:
         if args.query:
             print(scope.query(args.query, debug=args.debug))
             return 0
         if args.configure:
             setup = DEFAULT_SETUP
-            setup.channel = f"CH{args.channel}"
             print("IDN:", scope.query("*IDN?"))
-            applied = configure(scope, setup)
-            print(f"Applied {len(applied)} settings to {setup.channel}. Reading them back:\n")
+            applied = configure(scope, setup, channels)
+            names = ", ".join(f"CH{c}" for c in channels)
+            print(f"Applied {len(applied)} settings to {names}. Reading them back:\n")
             return 0 if report(verify(scope, applied)) else 1
         if args.capture:
-            if args.channels:
-                channels = [int(c) for c in args.channels.split(",") if c.strip()]
-            else:
-                channels = [args.channel]
             return capture(scope, channels, args.points,
                            save=args.save, plot=args.plot, plot_png=args.plot_png)
         # default action is identify
