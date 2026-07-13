@@ -229,11 +229,7 @@ def report(results: list[CheckResult]) -> bool:
     return passed == total
 
 
-# ---------------------------------------------------------------------------
-# Capture — the same job as bench_scope.py --capture, over the socket. Pulls an
-# ASCII curve (comma-separated codes), applies the affine scaling, and can print
-# a summary, save the samples to CSV, or plot them (ASCII in-terminal, or a PNG).
-# ---------------------------------------------------------------------------
+
 @dataclass
 class Waveform:
     channel: str
@@ -302,12 +298,8 @@ def save_csv(wf: Waveform, path: str) -> None:
 
 
 def ascii_plot(wf: Waveform, width: int = 70, height: int = 21) -> None:
-    """Draw an ASCII plot of the waveform in the terminal (no libraries).
 
-    Each column shows the min..max of EVERY sample that falls in it (a vertical bar),
-    so the plot reaches the true peaks and matches the capture's Vpp exactly — no
-    aliasing from skipping samples. The y-axis spans the capture's actual min/max.
-    """
+    
     v, n = wf.v, len(wf.v)
     vmin, vmax = min(v), max(v)
     span = (vmax - vmin) or 1.0
@@ -359,20 +351,142 @@ def save_png(wf: Waveform, path: str) -> bool:
     return True
 
 
-def capture(scope: SocketScope, channel: int = 1, points: int = 1000, *,
+# ---------------------------------------------------------------------------
+# Multi-channel: capture several channels, then emit BOTH per-channel outputs
+# and a joint (all-channels-together) output.
+# ---------------------------------------------------------------------------
+def _derive(path: str, suffix: str) -> str:
+    """'wave.csv' + 'CH1' -> 'wave_CH1.csv'."""
+    root, ext = os.path.splitext(path)
+    return f"{root}_{suffix}{ext}"
+
+
+def acquire_many(scope: SocketScope, channels: list[int],
+                 points: int = 1000) -> dict[int, Waveform]:
+    """Capture each channel in turn. Channels with no data are skipped (with a note)."""
+    waves: dict[int, Waveform] = {}
+    for ch in channels:
+        wf = acquire(scope, ch, points)
+        if wf is None:
+            print(f"CH{ch}: no curve data - is the channel displayed and acquiring?",
+                  file=sys.stderr)
+            continue
+        waves[ch] = wf
+    return waves
+
+
+def save_joint_csv(waves: dict[int, Waveform], path: str) -> None:
+    """One CSV holding every channel against a shared time column."""
+    import csv
+    chans = sorted(waves)
+    n = min(len(waves[c].v) for c in chans)
+    t = waves[chans[0]].t
+    with open(path, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["index", "time_s"] + [f"{waves[c].channel}_volts" for c in chans])
+        for i in range(n):
+            writer.writerow([i, f"{t[i]:.9g}"] + [f"{waves[c].v[i]:.6g}" for c in chans])
+    print(f"saved joint CSV ({len(chans)} channels x {n} samples) to {path}")
+
+
+def ascii_plot_joint(waves: dict[int, Waveform], width: int = 70, height: int = 21) -> None:
+    """Overlay every channel on one ASCII plot, sharing a single voltage axis."""
+    chans = sorted(waves)
+    symbols = ["*", "+", "o", "x"]
+    marks = {c: symbols[i % len(symbols)] for i, c in enumerate(chans)}
+
+    all_v = [val for c in chans for val in waves[c].v]
+    vmin, vmax = min(all_v), max(all_v)
+    span = (vmax - vmin) or 1.0
+    grid = [[" "] * width for _ in range(height)]
+
+    def row_of(val: float) -> int:
+        return max(0, min(height - 1, round((vmax - val) / span * (height - 1))))
+
+    if vmin <= 0 <= vmax:
+        grid[row_of(0.0)] = ["-"] * width
+
+    for c in chans:
+        v, n, mark = waves[c].v, len(waves[c].v), marks[c]
+        for col in range(width):
+            lo = col * n // width
+            hi = max(lo + 1, (col + 1) * n // width)
+            seg = v[lo:hi]
+            for r in range(row_of(max(seg)), row_of(min(seg)) + 1):
+                cur = grid[r][col]
+                # '#' marks where channels overlap
+                grid[r][col] = mark if cur in (" ", "-", mark) else "#"
+
+    t = waves[chans[0]].t
+    legend = "  ".join(f"{marks[c]}={waves[c].channel}" for c in chans) + "  #=overlap"
+    print(f"  {vmax:+.3g} V +" + "-" * width)
+    for r in grid:
+        print("           |" + "".join(r))
+    print(f"  {vmin:+.3g} V +" + "-" * width)
+    print(f"             {t[0]:g} s{' ' * max(1, width - 14)}{t[-1]:g} s")
+    print(f"             {legend}")
+
+
+def save_png_joint(waves: dict[int, Waveform], path: str) -> bool:
+    """One PNG with every channel overlaid on a shared axis, with a legend."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib not installed - skipping joint PNG. Install it with "
+              "'pip install matplotlib', or use --plot for an ASCII plot.",
+              file=sys.stderr)
+        return False
+    chans = sorted(waves)
+    plt.figure(figsize=(10, 4.5))
+    for c in chans:
+        wf = waves[c]
+        plt.plot(wf.t, wf.v, linewidth=0.8, label=wf.channel)
+    plt.xlabel("time (s)")
+    plt.ylabel("volts")
+    plt.title("Joint capture: " + ", ".join(waves[c].channel for c in chans))
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.savefig(path, dpi=110, bbox_inches="tight")
+    plt.close()
+    print(f"saved joint plot to {path}")
+    return True
+
+
+def capture(scope: SocketScope, channels: list[int], points: int = 1000, *,
             save: str | None = None, plot: bool = False,
             plot_png: str | None = None) -> int:
-    wf = acquire(scope, channel, points)
-    if wf is None:
-        print("no curve data returned (is a signal being acquired?)", file=sys.stderr)
+    waves = acquire_many(scope, channels, points)
+    if not waves:
+        print("no curve data from any channel (is a signal being acquired?)",
+              file=sys.stderr)
         return 1
-    summarize(wf)
-    if save:
-        save_csv(wf, save)
-    if plot:
-        ascii_plot(wf)
-    if plot_png:
-        save_png(wf, plot_png)
+
+    multi = len(waves) > 1
+
+    # --- per-channel outputs ---
+    for c in sorted(waves):
+        wf = waves[c]
+        print(f"--- {wf.channel} ---")
+        summarize(wf)
+        if save:
+            save_csv(wf, _derive(save, wf.channel) if multi else save)
+        if plot:
+            ascii_plot(wf)
+        if plot_png:
+            save_png(wf, _derive(plot_png, wf.channel) if multi else plot_png)
+        print()
+
+    # --- joint outputs (only meaningful with 2+ channels) ---
+    if multi:
+        print("--- JOINT (all channels) ---")
+        if save:
+            save_joint_csv(waves, _derive(save, "joint"))
+        if plot:
+            ascii_plot_joint(waves)
+        if plot_png:
+            save_png_joint(waves, _derive(plot_png, "joint"))
     return 0
 
 
@@ -391,15 +505,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--capture", action="store_true",
                         help="Pull an ASCII waveform off a channel and summarise it.")
     parser.add_argument("--channel", type=int, default=1,
-                        help="Channel number for --configure/--capture. Default: 1.")
+                        help="Channel number for --configure (and --capture if --channels "
+                             "is not given). Default: 1.")
+    parser.add_argument("--channels", default=None, metavar="LIST",
+                        help="Comma-separated channels for --capture, e.g. 1,2. Each is "
+                             "captured separately AND combined into joint outputs.")
     parser.add_argument("--points", type=int, default=1000,
                         help="Number of samples to transfer for --capture. Default: 1000.")
     parser.add_argument("--save", metavar="CSV", default=None,
-                        help="With --capture: save the waveform to a CSV file (index, time, volts).")
+                        help="With --capture: save to CSV. Multi-channel writes one file per "
+                             "channel (wave_CH1.csv, ...) plus a joint wave_joint.csv.")
     parser.add_argument("--plot", action="store_true",
-                        help="With --capture: draw an ASCII plot in the terminal (no libraries).")
+                        help="With --capture: ASCII plot in the terminal (no libraries). "
+                             "Multi-channel also draws a joint overlay plot.")
     parser.add_argument("--plot-png", metavar="PNG", default=None,
-                        help="With --capture: save a PNG plot (needs matplotlib).")
+                        help="With --capture: save a PNG (needs matplotlib). Multi-channel "
+                             "writes one PNG per channel plus a joint overlay PNG.")
     parser.add_argument("--query", metavar="SCPI", default=None,
                         help="Send an arbitrary SCPI query and print the reply.")
     parser.add_argument("--debug", action="store_true",
@@ -435,7 +556,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Applied {len(applied)} settings to {setup.channel}. Reading them back:\n")
             return 0 if report(verify(scope, applied)) else 1
         if args.capture:
-            return capture(scope, args.channel, args.points,
+            if args.channels:
+                channels = [int(c) for c in args.channels.split(",") if c.strip()]
+            else:
+                channels = [args.channel]
+            return capture(scope, channels, args.points,
                            save=args.save, plot=args.plot, plot_png=args.plot_png)
         # default action is identify
         print("IDN:", scope.query("*IDN?", debug=args.debug))
