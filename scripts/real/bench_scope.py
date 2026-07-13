@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 
-#   set SCOPE_RESOURCE=TCPIP0::192.168.0.10::INSTR
+#   Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match "VID_0699" } | Select-Object Status, Class, FriendlyName, InstanceId | Format-List
+#   python -c "import pyvisa; rm=pyvisa.ResourceManager('@py'); print('resources:', rm.list_resources())"
+#   cd C:\Users\25nar\KPITInternship\Autonomation\scripts\real
+# $env:SCOPE_RESOURCE = "USB0::0x0699::0x0527::C012345::INSTR"   # paste the exact string from Step 4
+
+# python bench_scope.py --identify
+# python bench_configure.py
+# python bench_scope.py --capture --channel 1
+
+# set SCOPE_RESOURCE=TCPIP0::192.168.0.10::INSTR
 #   python bench_scope.py --identify
 #   python bench_scope.py --capture --channel 1
+
 
 from __future__ import annotations
 
@@ -61,6 +71,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--standalone", action="store_true",
                         help="Force the PyVISA-py backend (@py) — use on a machine with "
                              "no full VISA (e.g. LAN over VXI-11 with only pyvisa-py).")
+    parser.add_argument("--visa-library", default=None, metavar="DLL",
+                        help=r"Point VISA at a specific library instead of the system "
+                             r"default. Needed when the IVI stub (visa32.dll) is broken: "
+                             r"use TekVISA directly, e.g. C:\Windows\System32\tkVisa64.dll")
     return parser.parse_args(argv)
 
 
@@ -77,8 +91,12 @@ def main(argv: list[str] | None = None) -> int:
         # DeviceManager is a context manager: it closes the connection on exit.
         # currently verbose is off so we don't get any tm_devices clutter. If you want to see the SCPI traffic turn verbose On
         with DeviceManager(verbose=False) as dm:
-            # Force PyVISA-py when there's no full VISA on this machine (LAN/VXI-11).
-            if args.standalone:
+            # Pick the VISA backend. --visa-library wins (point it straight at
+            # TekVISA's tkVisa64.dll when the IVI visa32.dll stub is broken);
+            # --standalone forces pure-Python pyvisa-py (LAN only, no USB).
+            if args.visa_library:
+                dm.visa_library = args.visa_library
+            elif args.standalone:
                 dm.visa_library = "@py"
             scope = open_scope(dm, scope_resource)
             identify(scope)

@@ -9,8 +9,8 @@
 # -----------------------------------------------------------------------------
 # STEP 0 — Python
 # -----------------------------------------------------------------------------
-# Install Python 3.11 or newer (built and tested on 3.13) from
-#   https://www.python.org/downloads/
+# Install Python 3.10 or newer (tm_devices supports >=3.10,<3.15; built and tested
+# on 3.13) from  https://www.python.org/downloads/
 # On Windows, TICK "Add python.exe to PATH" during install. Verify:
 #   python --version
 #
