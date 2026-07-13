@@ -209,7 +209,7 @@ SETUPS: dict[str, ScopeSetup] = {
         acquire_mode="SAMple",        # "Sample" in the Acquisition badge
         trigger_source="CH1",
         trigger_level=6.8,
-        trigger_slope="FALL",         # the falling-edge icon on the Trigger badge
+        trigger_slope="RISE",         # the falling-edge icon on the Trigger badge
     ),
 }
 
@@ -564,9 +564,56 @@ def save_png_joint(waves: dict[int, Waveform], path: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Acquisition control.
+#
+# --capture only READS whatever record is already in the scope's memory. That is
+# fine if the scope is Stopped (the record is frozen and stays there indefinitely),
+# but if the scope is Running the record gets overwritten by each new trigger.
+#
+# is_running()  -> lets us warn about that.
+# arm_single()  -> makes it deterministic: arm ONE acquisition, wait for the
+#                  trigger and the record to fill, and only then read.
+# ---------------------------------------------------------------------------
+def is_running(scope: SocketScope) -> bool:
+    """True if the scope is currently acquiring (so its record can change under us)."""
+    return scope.query("ACQuire:STATE?").strip().upper() in ("1", "ON", "RUN")
+
+
+def arm_single(scope: SocketScope, timeout: float = 120.0, poll: float = 0.5) -> bool:
+    """Arm exactly ONE acquisition and block until it completes.
+
+    STOPAfter SEQuence makes the scope stop after a single record, so we can poll
+    ACQuire:STATE? until it reports stopped. Returns False if it never completed
+    within `timeout` (i.e. the trigger never fired).
+    """
+    scope.write("ACQuire:STOPAfter SEQuence")   # one shot, do not free-run
+    scope.write("ACQuire:STATE RUN")            # arm it
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        if not is_running(scope):
+            print(f"  acquisition complete after {time.monotonic() - start:.1f} s")
+            return True
+        time.sleep(poll)    # explicit poll interval - do not spin on the scope
+    return False
+
+
 def capture(scope: SocketScope, channels: list[int], points: int = 1000, *,
             save: str | None = None, plot: bool = False,
-            plot_png: str | None = None) -> int:
+            plot_png: str | None = None, single: bool = False,
+            timeout: float = 120.0) -> int:
+    if single:
+        print(f"Arming a single acquisition; waiting up to {timeout:g} s for the "
+              f"trigger and the record to fill...")
+        if not arm_single(scope, timeout):
+            print(f"acquisition did not complete within {timeout:g} s - did the trigger "
+                  f"ever fire?", file=sys.stderr)
+            return 1
+    elif is_running(scope):
+        print("WARNING: the scope is RUNNING, so the record can be overwritten while we "
+              "read it.\n         Stop the scope, or use --single for a deterministic "
+              "capture.", file=sys.stderr)
+
     waves = acquire_many(scope, channels, points)
     if not waves:
         print("no curve data from any channel (is a signal being acquired?)",
@@ -627,6 +674,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "captured separately AND combined into joint outputs.")
     parser.add_argument("--points", type=int, default=1000,
                         help="Number of samples to transfer for --capture. Default: 1000.")
+    parser.add_argument("--single", action="store_true",
+                        help="With --capture: arm ONE acquisition and wait for it to "
+                             "complete before reading. Use this to deterministically "
+                             "capture the NEXT event instead of whatever is in memory.")
+    parser.add_argument("--timeout", type=float, default=120.0, metavar="SEC",
+                        help="With --single: how long to wait for the acquisition to "
+                             "complete. Default: 120 seconds.")
     parser.add_argument("--save", metavar="CSV", default=None,
                         help="With --capture: save to CSV. Multi-channel writes one file per "
                              "channel (wave_CH1.csv, ...) plus a joint wave_joint.csv.")
@@ -716,7 +770,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if report(verify(scope, applied)) else 1
         if args.capture:
             return capture(scope, channels, args.points,
-                           save=args.save, plot=args.plot, plot_png=args.plot_png)
+                           save=args.save, plot=args.plot, plot_png=args.plot_png,
+                           single=args.single, timeout=args.timeout)
         # default action is identify
         print("IDN:", scope.query("*IDN?", debug=args.debug))
         return 0
