@@ -30,7 +30,7 @@ import re
 import socket
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -104,30 +104,116 @@ def _clean(raw: str, cmd: str) -> str:
 # standard Tek SCPI writes, then reads every setting back and checks it landed.
 # ---------------------------------------------------------------------------
 @dataclass
+class ChannelSetup:
+    """Vertical settings — these are PER CHANNEL, so each channel can differ."""
+    scale: float | None = None        # volts/div
+    offset: float | None = None       # volts
+    coupling: str | None = None       # DC | AC | DCREJ
+    termination: float | None = None  # input impedance in ohms: 1e6 (1 MOhm) or 50
+    bandwidth: float | None = None    # input bandwidth limit in Hz, e.g. 500e6
+
+
+@dataclass
 class ScopeSetup:
-    channel: str = "CH1"
-    vertical_scale: float | None = None      # volts/div
-    vertical_offset: float | None = None     # volts
-    coupling: str | None = None              # DC | AC | DCREJ
+    """A named bench setup: per-channel vertical + scope-wide horizontal/trigger."""
+    name: str = "custom"
+    # Per-channel vertical settings, keyed by channel number.
+    channels: dict[int, ChannelSetup] = field(default_factory=dict)
+    # Used for any channel you ask for that isn't listed in `channels`.
+    default_channel: ChannelSetup = field(default_factory=ChannelSetup)
+    # Horizontal — GLOBAL to the scope, sent once.
+    # MANual lets you set sample rate and record length independently (this is the
+    # "Manual" shown in the scope's Acquisition badge). AUTO derives them for you.
+    horizontal_mode: str | None = None       # AUTO | MANual
     sample_rate: float | None = None         # samples/s
     horizontal_scale: float | None = None    # seconds/div
     record_length: int | None = None
+    # Trigger position on the horizontal axis: percent of the record kept BEFORE the
+    # trigger (Tek default 10%). 10 => trigger sits 10% in from the left edge.
+    horizontal_position: float | None = None
+    # Acquisition — GLOBAL. SAMple is the plain "Sample" mode in the Acquisition badge.
+    acquire_mode: str | None = None          # SAMple | PEAKdetect | HIRes | AVErage | ENVelope
+    # Trigger — GLOBAL to the scope, sent once.
     trigger_source: str | None = None
     trigger_level: float | None = None       # volts
     trigger_slope: str | None = None         # RISE | FALL
 
 
-DEFAULT_SETUP = ScopeSetup(
-    channel="CH1",
-    vertical_scale=0.5,
-    vertical_offset=0.0,
-    coupling="DC",
-    sample_rate=1.25e9,
-    record_length=100_000,
-    trigger_source="CH1",
-    trigger_level=1.0,
-    trigger_slope="RISE",
-)
+# ---------------------------------------------------------------------------
+# Named setups. Pick one with  --setup <name>  ;  list them with --list-setups.
+# Add your own here — it's just a dict entry.
+# ---------------------------------------------------------------------------
+SETUPS: dict[str, ScopeSetup] = {
+    # Generic fast-timebase default (what the script shipped with).
+    "default": ScopeSetup(
+        name="default",
+        channels={1: ChannelSetup(scale=0.5, offset=0.0, coupling="DC")},
+        default_channel=ChannelSetup(scale=0.5, offset=0.0, coupling="DC"),
+        sample_rate=1.25e9,
+        record_length=100_000,
+        horizontal_position=10.0,     # trigger 10% in from the left (Tek default)
+        trigger_source="CH1",
+        trigger_level=1.0,
+        trigger_slope="RISE",
+    ),
+
+    # Matches the bench screenshot: CH1+CH2 at 5 V/div, 4 s/div, 250 S/s,
+    # 10 kpts, trigger on CH1 @ 6.8 V.
+    # Note these three are self-consistent: 250 S/s * 4 s/div * 10 div = 10,000 pts.
+    "bench": ScopeSetup(
+        name="bench",
+        channels={
+            1: ChannelSetup(scale=5.0, offset=0.0, coupling="DC"),
+            2: ChannelSetup(scale=5.0, offset=0.0, coupling="DC"),
+        },
+        default_channel=ChannelSetup(scale=5.0, offset=0.0, coupling="DC"),
+        sample_rate=250,
+        horizontal_scale=4.0,
+        record_length=10_000,
+        horizontal_position=10.0,     # the "10%" shown in the Horizontal panel
+        trigger_source="CH1",
+        trigger_level=6.8,
+        trigger_slope="FALL",   # flip to "RISE" if your trigger is rising-edge
+    ),
+
+    # ---------------------------------------------------------------------
+    # "bench_full" — every setting readable from the scope's front-panel
+    # badges, transcribed exactly:
+    #
+    #   Ch 1 / Ch 2   5 V/div, 1 MOhm, 500 MHz
+    #   Horizontal    4 s/div (40 s total), SR 250 S/s, 4 ms/pt,
+    #                 RL 10 kpts, position 10%
+    #   Trigger       CH1, falling edge, 6.8 V
+    #   Acquisition   Manual, Sample
+    #
+    # Cross-check: 250 S/s * 4 s/div * 10 div = 10,000 pts, and 1/250 = 4 ms/pt.
+    # Both agree with the badges, so the numbers are self-consistent.
+    #
+    # Not set here (not shown in the badges / no reliable SCPI):
+    #   - vertical offset (not on the badge, so we leave it alone)
+    #   - "12 bits" ADC resolution and "1 Acqs" (informational)
+    # ---------------------------------------------------------------------
+    "bench_full": ScopeSetup(
+        name="bench_full",
+        channels={
+            1: ChannelSetup(scale=5.0, coupling="DC", termination=1e6, bandwidth=500e6),
+            2: ChannelSetup(scale=5.0, coupling="DC", termination=1e6, bandwidth=500e6),
+        },
+        default_channel=ChannelSetup(scale=5.0, coupling="DC",
+                                     termination=1e6, bandwidth=500e6),
+        horizontal_mode="MANual",     # the "Manual" in the Acquisition badge
+        sample_rate=250,              # SR: 250 S/s   (=> 4 ms/pt)
+        horizontal_scale=4.0,         # 4 s/div       (=> 40 s across the screen)
+        record_length=10_000,         # RL: 10 kpts
+        horizontal_position=10.0,     # 10%
+        acquire_mode="SAMple",        # "Sample" in the Acquisition badge
+        trigger_source="CH1",
+        trigger_level=6.8,
+        trigger_slope="FALL",         # the falling-edge icon on the Trigger badge
+    ),
+}
+
+DEFAULT_SETUP = SETUPS["default"]   # kept for backwards compatibility
 
 
 @dataclass
@@ -159,31 +245,46 @@ def configure(scope: SocketScope, setup: ScopeSetup,
     scope, so they're sent once regardless of how many channels are listed.
     """
     if channels is None:
-        channels = [_channel_number(setup.channel)]
+        channels = sorted(setup.channels) or [1]
     settings: list[Setting] = []
 
     def apply(base: str, value: Any) -> None:
         scope.write(f"{base} {value}")
         settings.append(Setting(base, value, f"{base}?"))
 
-    # Vertical — per channel.
+    # Vertical — per channel, each using ITS OWN ChannelSetup.
     for n in channels:
+        cs = setup.channels.get(n, setup.default_channel)
         ch = f"CH{n}"
         scope.write(f"SELect:{ch} ON")
-        if setup.vertical_scale is not None:
-            apply(f"{ch}:SCAle", setup.vertical_scale)
-        if setup.vertical_offset is not None:
-            apply(f"{ch}:OFFSet", setup.vertical_offset)
-        if setup.coupling:
-            apply(f"{ch}:COUPling", setup.coupling)
+        if cs.scale is not None:
+            apply(f"{ch}:SCAle", cs.scale)
+        if cs.offset is not None:
+            apply(f"{ch}:OFFSet", cs.offset)
+        if cs.coupling:
+            apply(f"{ch}:COUPling", cs.coupling)
+        if cs.termination:
+            apply(f"{ch}:TERmination", cs.termination)      # 1e6 = 1 MOhm, 50 = 50 Ohm
+        if cs.bandwidth:
+            apply(f"{ch}:BANdwidth", cs.bandwidth)          # e.g. 500e6 = 500 MHz
 
     # Horizontal — global, sent once.
+    # MODE first: MANual must be set before sample rate / record length will stick.
+    if setup.horizontal_mode:
+        apply("HORizontal:MODE", setup.horizontal_mode)
     if setup.sample_rate:
         apply("HORizontal:SAMPLERate", setup.sample_rate)
     if setup.horizontal_scale:
         apply("HORizontal:SCAle", setup.horizontal_scale)
     if setup.record_length:
         apply("HORizontal:RECOrdlength", setup.record_length)
+    if setup.horizontal_position is not None:
+        # Where the trigger sits horizontally, as a % of the record before it.
+        apply("HORizontal:POSition", setup.horizontal_position)
+
+    # Acquisition — global, sent once.
+    if setup.acquire_mode:
+        apply("ACQuire:MODe", setup.acquire_mode)
 
     # Trigger (edge) — global, sent once.
     if setup.trigger_source:
@@ -510,12 +611,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--identify", action="store_true",
                         help="Query *IDN? and print the scope's identity (the default).")
     parser.add_argument("--configure", action="store_true",
-                        help="Apply DEFAULT_SETUP and print a read-back PASS/FAIL table.")
+                        help="Apply a setup (see --setup) and print a read-back PASS/FAIL table.")
+    parser.add_argument("--setup", default="default", metavar="NAME",
+                        help="Which named setup --configure applies. Default: 'default'. "
+                             "See --list-setups.")
+    parser.add_argument("--list-setups", action="store_true",
+                        help="Print the available named setups and exit.")
     parser.add_argument("--capture", action="store_true",
                         help="Pull an ASCII waveform off a channel and summarise it.")
-    parser.add_argument("--channel", type=int, default=1,
-                        help="Channel number for --configure (and --capture if --channels "
-                             "is not given). Default: 1.")
+    parser.add_argument("--channel", type=int, default=None,
+                        help="Single channel for --configure/--capture. If omitted, "
+                             "--configure uses the setup's own channels and --capture uses CH1.")
     parser.add_argument("--channels", default=None, metavar="LIST",
                         help="Comma-separated channels for --capture, e.g. 1,2. Each is "
                              "captured separately AND combined into joint outputs.")
@@ -537,8 +643,36 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _print_setups() -> None:
+    def chan_desc(cs: ChannelSetup) -> str:
+        bits = [f"{cs.scale} V/div"]
+        if cs.coupling:
+            bits.append(cs.coupling)
+        if cs.termination:
+            bits.append("1 MOhm" if cs.termination >= 1e6 else f"{cs.termination:g} Ohm")
+        if cs.bandwidth:
+            bits.append(f"{cs.bandwidth / 1e6:g} MHz")
+        return "/".join(bits)
+
+    for name, s in SETUPS.items():
+        print(f"  {name}")
+        for n, cs in sorted(s.channels.items()):
+            print(f"      CH{n}      : {chan_desc(cs)}")
+        print(f"      horizontal: {s.horizontal_scale} s/div, {s.sample_rate} S/s, "
+              f"{s.record_length} pts, pos {s.horizontal_position}%"
+              + (f", mode {s.horizontal_mode}" if s.horizontal_mode else ""))
+        print(f"      trigger  : {s.trigger_source} @ {s.trigger_level} V {s.trigger_slope}")
+        if s.acquire_mode:
+            print(f"      acquire  : {s.acquire_mode}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+
+    if args.list_setups:
+        print("Available setups (use --setup NAME):")
+        _print_setups()
+        return 0
 
     host = args.host or os.environ.get("SCOPE_HOST")
     if not host:
@@ -553,22 +687,32 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
 
-    # --channels (e.g. "1,2") wins; otherwise fall back to the single --channel.
+    # --channels (e.g. "1,2") wins; then a single --channel; else CH1 for capture.
     if args.channels:
         channels = [int(c) for c in args.channels.split(",") if c.strip()]
-    else:
+    elif args.channel is not None:
         channels = [args.channel]
+    else:
+        channels = [1]
 
     try:
         if args.query:
             print(scope.query(args.query, debug=args.debug))
             return 0
         if args.configure:
-            setup = DEFAULT_SETUP
+            setup = SETUPS.get(args.setup)
+            if setup is None:
+                print(f"Unknown setup {args.setup!r}. Available: "
+                      f"{', '.join(SETUPS)}", file=sys.stderr)
+                return 2
+            # With no --channel/--channels, configure exactly the channels the setup defines.
+            cfg_channels = channels if (args.channels or args.channel is not None) \
+                else (sorted(setup.channels) or [1])
             print("IDN:", scope.query("*IDN?"))
-            applied = configure(scope, setup, channels)
-            names = ", ".join(f"CH{c}" for c in channels)
-            print(f"Applied {len(applied)} settings to {names}. Reading them back:\n")
+            applied = configure(scope, setup, cfg_channels)
+            names = ", ".join(f"CH{c}" for c in cfg_channels)
+            print(f"Applied {len(applied)} settings from setup '{setup.name}' to {names}. "
+                  f"Reading them back:\n")
             return 0 if report(verify(scope, applied)) else 1
         if args.capture:
             return capture(scope, channels, args.points,
