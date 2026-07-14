@@ -429,8 +429,8 @@ def ascii_plot(wf: Waveform, width: int = 70, height: int = 21) -> None:
 
     
     v, n = wf.v, len(wf.v)
-    vmin, vmax = min(v), max(v)
-    span = (vmax - vmin) or 1.0
+    vmin, vmax = _v_range(v)              # pads a flat signal so it sits mid-plot
+    span = vmax - vmin
     grid = [[" "] * width for _ in range(height)]
 
     def row_of(val: float) -> int:
@@ -491,6 +491,20 @@ _FONT: dict[str, list[str]] = {
 
 # One colour per channel, in channel order.
 _TRACE_COLORS = [(198, 156, 0), (0, 150, 200), (200, 60, 60), (60, 160, 60)]
+
+
+def _v_range(values: list[float]) -> tuple[float, float]:
+    """The voltage range to plot over.
+
+    A perfectly FLAT signal (e.g. a zero waveform) has vmin == vmax, which would
+    otherwise put the trace exactly on the plot border and make it invisible - or
+    divide by zero. Pad it symmetrically so a flat line is drawn down the MIDDLE.
+    """
+    vmin, vmax = min(values), max(values)
+    if vmax == vmin:
+        pad = abs(vmax) * 0.1 or 1.0        # 10% of the level, or +/-1 V at exactly 0
+        vmin, vmax = vmin - pad, vmax + pad
+    return vmin, vmax
 
 
 class _Canvas:
@@ -582,9 +596,7 @@ def _render_png(waves: dict[int, Waveform], path: str) -> None:
 
     chans = sorted(waves)
     all_v = [val for c in chans for val in waves[c].v]
-    vmin, vmax = min(all_v), max(all_v)
-    if vmax == vmin:
-        vmax = vmin + 1.0
+    vmin, vmax = _v_range(all_v)          # pads a flat signal so it sits mid-plot
     span = vmax - vmin
     t = waves[chans[0]].t
 
@@ -712,8 +724,8 @@ def ascii_plot_joint(waves: dict[int, Waveform], width: int = 70, height: int = 
     marks = {c: symbols[i % len(symbols)] for i, c in enumerate(chans)}
 
     all_v = [val for c in chans for val in waves[c].v]
-    vmin, vmax = min(all_v), max(all_v)
-    span = (vmax - vmin) or 1.0
+    vmin, vmax = _v_range(all_v)          # pads a flat signal so it sits mid-plot
+    span = vmax - vmin
     grid = [[" "] * width for _ in range(height)]
 
     def row_of(val: float) -> int:
@@ -767,6 +779,38 @@ def is_running(scope: SocketScope) -> bool:
     return scope.query("ACQuire:STATE?").strip().upper() in ("1", "ON", "RUN")
 
 
+def free_run(scope: SocketScope, timeout: float = 60.0, poll: float = 0.5) -> bool:
+    """Put the scope in continuous AUTO acquisition and wait for ONE fresh record.
+
+    Use this when you just want whatever the scope is showing - including a flat or
+    zero signal that would never satisfy a real trigger. AUTO makes the scope
+    self-trigger, so a record always fills.
+
+    We then STOP the scope, so the record is frozen while we read it back (our read
+    takes several queries, and a running scope would overwrite it mid-read).
+    """
+    scope.write("TRIGger:A:MODe AUTO")          # self-trigger; don't wait for an edge
+    scope.write("ACQuire:STOPAfter RUNSTop")    # continuous, not single-sequence
+    scope.write("ACQuire:STATE RUN")
+
+    def num_acq() -> int:
+        try:
+            return int(float(scope.query("ACQuire:NUMACq?") or 0))
+        except ValueError:
+            return 0
+
+    start_n = num_acq()
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        time.sleep(poll)
+        if num_acq() > start_n:                 # a NEW record has completed
+            scope.write("ACQuire:STATE STOP")   # freeze it so the read is consistent
+            print(f"  free-run: got a fresh record after "
+                  f"{time.monotonic() - start:.1f} s")
+            return True
+    return False
+
+
 def arm_single(scope: SocketScope, timeout: float = 120.0, poll: float = 0.5) -> bool:
     """Arm exactly ONE acquisition and block until it completes.
 
@@ -797,8 +841,16 @@ def arm_single(scope: SocketScope, timeout: float = 120.0, poll: float = 0.5) ->
 def capture(scope: SocketScope, channels: list[int], points: int = 1000, *,
             save: str | None = None, plot: bool = False,
             plot_png: str | None = None, single: bool = False,
-            timeout: float = 120.0) -> int:
-    if single:
+            free: bool = False, timeout: float = 120.0) -> int:
+    if free:
+        print(f"Free-run: AUTO trigger + continuous acquisition; waiting up to "
+              f"{timeout:g} s for one fresh record...")
+        if not free_run(scope, timeout):
+            print(f"no fresh record within {timeout:g} s. Is the scope able to acquire? "
+                  f"(a slow timebase needs a long record - e.g. 250 S/s x 10 kpts = 40 s)",
+                  file=sys.stderr)
+            return 1
+    elif single:
         print(f"Arming a single acquisition; waiting up to {timeout:g} s for the "
               f"trigger and the record to fill...")
         if not arm_single(scope, timeout):
@@ -874,6 +926,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="With --capture: arm ONE acquisition and wait for it to "
                              "complete before reading. Use this to deterministically "
                              "capture the NEXT event instead of whatever is in memory.")
+    parser.add_argument("--free-run", action="store_true",
+                        help="With --capture: put the scope in AUTO + continuous "
+                             "acquisition, wait for one fresh record, then read it. "
+                             "Use this to grab whatever is on screen - including a flat "
+                             "or zero signal that would never fire a real trigger.")
     parser.add_argument("--timeout", type=float, default=120.0, metavar="SEC",
                         help="With --single: how long to wait for the acquisition to "
                              "complete. Default: 120 seconds.")
@@ -888,6 +945,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "writes one PNG per channel plus a joint overlay PNG.")
     parser.add_argument("--query", metavar="SCPI", default=None,
                         help="Send an arbitrary SCPI query and print the reply.")
+    parser.add_argument("--send", metavar="SCPI", default=None,
+                        help="Send an arbitrary SCPI COMMAND (no reply expected), e.g. "
+                             "--send \"TRIGger:A:MODe AUTO\".")
     parser.add_argument("--debug", action="store_true",
                         help="Also print the raw (uncleaned) reply to stderr.")
     return parser.parse_args(argv)
@@ -946,6 +1006,10 @@ def main(argv: list[str] | None = None) -> int:
         channels = [1]
 
     try:
+        if args.send:
+            scope.write(args.send)
+            print(f"sent: {args.send}")
+            return 0
         if args.query:
             print(scope.query(args.query, debug=args.debug))
             return 0
@@ -967,7 +1031,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.capture:
             return capture(scope, channels, args.points,
                            save=args.save, plot=args.plot, plot_png=args.plot_png,
-                           single=args.single, timeout=args.timeout)
+                           single=args.single, free=args.free_run,
+                           timeout=args.timeout)
         # default action is identify
         print("IDN:", scope.query("*IDN?", debug=args.debug))
         return 0
