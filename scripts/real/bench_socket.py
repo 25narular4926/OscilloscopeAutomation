@@ -28,8 +28,10 @@ import argparse
 import os
 import re
 import socket
+import struct
 import sys
 import time
+import zlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -454,27 +456,215 @@ def ascii_plot(wf: Waveform, width: int = 70, height: int = 21) -> None:
     print(f"             {wf.t[0]:g} s{' ' * max(1, width - 14)}{wf.t[-1]:g} s")
 
 
-def save_png(wf: Waveform, path: str) -> bool:
-    """Save a PNG plot via matplotlib if it's installed; otherwise say so."""
+# ===========================================================================
+# PNG output.
+#
+# matplotlib is OPTIONAL. If it is installed we use it (nicer axes/fonts). If it
+# is not, we fall back to a built-in renderer that writes a real PNG using only
+# the standard library (zlib + struct). That keeps this script's promise: it runs
+# with ZERO pip installs, which matters on a locked-down TestStand machine.
+# ===========================================================================
+
+# A tiny 5x7 bitmap font - just the characters the axis labels and legend need.
+_FONT: dict[str, list[str]] = {
+    "0": [".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."],
+    "1": ["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."],
+    "2": [".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"],
+    "3": [".###.", "#...#", "....#", "..##.", "....#", "#...#", ".###."],
+    "4": ["...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."],
+    "5": ["#####", "#....", "####.", "....#", "....#", "#...#", ".###."],
+    "6": ["..##.", ".#...", "#....", "####.", "#...#", "#...#", ".###."],
+    "7": ["#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..."],
+    "8": [".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."],
+    "9": [".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.."],
+    ".": [".....", ".....", ".....", ".....", ".....", ".##..", ".##.."],
+    "-": [".....", ".....", ".....", "#####", ".....", ".....", "....."],
+    "+": [".....", "..#..", "..#..", "#####", "..#..", "..#..", "....."],
+    "e": [".....", ".....", ".###.", "#...#", "#####", "#....", ".###."],
+    "V": ["#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."],
+    "s": [".....", ".....", ".####", "#....", ".###.", "....#", "####."],
+    "C": [".###.", "#...#", "#....", "#....", "#....", "#...#", ".###."],
+    "H": ["#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+    ":": [".....", ".##..", ".##..", ".....", ".##..", ".##..", "....."],
+    " ": [".....", ".....", ".....", ".....", ".....", ".....", "....."],
+}
+
+# One colour per channel, in channel order.
+_TRACE_COLORS = [(198, 156, 0), (0, 150, 200), (200, 60, 60), (60, 160, 60)]
+
+
+class _Canvas:
+    """A tiny RGB pixel canvas that can write itself out as a real PNG."""
+
+    def __init__(self, w: int, h: int, bg: tuple[int, int, int] = (255, 255, 255)) -> None:
+        self.w, self.h = w, h
+        self.buf = bytearray(bytes(bg) * (w * h))
+
+    def px(self, x: int, y: int, c: tuple[int, int, int]) -> None:
+        if 0 <= x < self.w and 0 <= y < self.h:
+            i = (y * self.w + x) * 3
+            self.buf[i:i + 3] = bytes(c)
+
+    def hline(self, x0: int, x1: int, y: int, c) -> None:
+        for x in range(min(x0, x1), max(x0, x1) + 1):
+            self.px(x, y, c)
+
+    def vline(self, x: int, y0: int, y1: int, c) -> None:
+        for y in range(min(y0, y1), max(y0, y1) + 1):
+            self.px(x, y, c)
+
+    def line(self, x0: int, y0: int, x1: int, y1: int, c) -> None:
+        """Bresenham - used when there are fewer samples than pixel columns."""
+        dx, dy = abs(x1 - x0), -abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx + dy
+        while True:
+            self.px(x0, y0, c)
+            if x0 == x1 and y0 == y1:
+                return
+            e2 = 2 * err
+            if e2 >= dy:
+                err += dy
+                x0 += sx
+            if e2 <= dx:
+                err += dx
+                y0 += sy
+
+    def rect(self, x0: int, y0: int, x1: int, y1: int, c) -> None:
+        self.hline(x0, x1, y0, c)
+        self.hline(x0, x1, y1, c)
+        self.vline(x0, y0, y1, c)
+        self.vline(x1, y0, y1, c)
+
+    def text(self, x: int, y: int, s: str, c, scale: int = 2) -> None:
+        cx = x
+        for ch in s:
+            glyph = _FONT.get(ch, _FONT[" "])
+            for ry, row in enumerate(glyph):
+                for rx, bit in enumerate(row):
+                    if bit == "#":
+                        for sy in range(scale):
+                            for sx in range(scale):
+                                self.px(cx + rx * scale + sx, y + ry * scale + sy, c)
+            cx += 6 * scale
+        return
+
+    def save(self, path: str) -> None:
+        """Encode as an 8-bit RGB PNG. Pure stdlib: zlib + struct."""
+        raw = bytearray()
+        for y in range(self.h):
+            raw.append(0)                       # per-scanline filter type 0 (None)
+            i = y * self.w * 3
+            raw += self.buf[i:i + self.w * 3]
+
+        def chunk(tag: bytes, data: bytes) -> bytes:
+            return (struct.pack(">I", len(data)) + tag + data
+                    + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+        ihdr = struct.pack(">IIBBBBB", self.w, self.h, 8, 2, 0, 0, 0)  # 8-bit truecolour
+        png = (b"\x89PNG\r\n\x1a\n"
+               + chunk(b"IHDR", ihdr)
+               + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+               + chunk(b"IEND", b""))
+        with open(path, "wb") as fh:
+            fh.write(png)
+
+
+def _render_png(waves: dict[int, Waveform], path: str) -> None:
+    """Draw the waveform(s) and write a PNG - no third-party libraries at all."""
+    W, H = 960, 420
+    L, R, T, B = 84, 22, 34, 48           # margins
+    pw, ph = W - L - R, H - T - B
+
+    GRID, AXIS, TXT, ZERO = (228, 228, 228), (90, 90, 90), (40, 40, 40), (175, 175, 175)
+    cv = _Canvas(W, H)
+
+    chans = sorted(waves)
+    all_v = [val for c in chans for val in waves[c].v]
+    vmin, vmax = min(all_v), max(all_v)
+    if vmax == vmin:
+        vmax = vmin + 1.0
+    span = vmax - vmin
+    t = waves[chans[0]].t
+
+    def Y(v: float) -> int:
+        return T + int((vmax - v) / span * (ph - 1))
+
+    # grid, zero line, axes box
+    for k in range(1, 10):
+        cv.vline(L + k * pw // 10, T, T + ph, GRID)
+    for k in range(1, 8):
+        cv.hline(L, L + pw, T + k * ph // 8, GRID)
+    if vmin <= 0 <= vmax:
+        cv.hline(L, L + pw, Y(0.0), ZERO)
+    cv.rect(L, T, L + pw, T + ph, AXIS)
+
+    # traces
+    for idx, c in enumerate(chans):
+        col = _TRACE_COLORS[idx % len(_TRACE_COLORS)]
+        v, n = waves[c].v, len(waves[c].v)
+        if n >= pw:
+            # more samples than pixels: draw each column's min..max so peaks survive
+            for xcol in range(pw):
+                lo = xcol * n // pw
+                hi = max(lo + 1, (xcol + 1) * n // pw)
+                seg = v[lo:hi]
+                cv.vline(L + xcol, Y(max(seg)), Y(min(seg)), col)
+        else:
+            # fewer samples than pixels: join them up so the trace stays continuous
+            for i in range(n - 1):
+                x0 = L + i * (pw - 1) // max(1, n - 1)
+                x1 = L + (i + 1) * (pw - 1) // max(1, n - 1)
+                cv.line(x0, Y(v[i]), x1, Y(v[i + 1]), col)
+
+    # labels
+    cv.text(4, T - 4, f"{vmax:.3g} V", TXT)
+    cv.text(4, T + ph - 10, f"{vmin:.3g} V", TXT)
+    cv.text(L, T + ph + 12, f"{t[0]:.3g} s", TXT)
+    cv.text(L + pw - 90, T + ph + 12, f"{t[-1]:.3g} s", TXT)
+
+    # legend, in each trace's colour
+    lx = L + 8
+    for idx, c in enumerate(chans):
+        name = waves[c].channel
+        cv.text(lx, 8, name, _TRACE_COLORS[idx % len(_TRACE_COLORS)])
+        lx += 6 * 2 * (len(name) + 1)
+
+    cv.save(path)
+
+
+def _write_png(waves: dict[int, Waveform], path: str) -> bool:
+    """Write a PNG of one or more waveforms. Always succeeds - matplotlib optional."""
+    chans = sorted(waves)
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:
-        print("matplotlib not installed - skipping PNG. Install it with "
-              "'pip install matplotlib', or use --plot for an ASCII plot.",
-              file=sys.stderr)
-        return False
-    plt.figure(figsize=(9, 4))
-    plt.plot(wf.t, wf.v, linewidth=0.8)
+        _render_png(waves, path)          # built-in, zero dependencies
+        print(f"saved plot to {path}  (built-in renderer; "
+              f"'pip install matplotlib' for a nicer one)")
+        return True
+
+    plt.figure(figsize=(10, 4.5))
+    for c in chans:
+        plt.plot(waves[c].t, waves[c].v, linewidth=0.8, label=waves[c].channel)
     plt.xlabel("time (s)")
     plt.ylabel("volts")
-    plt.title(f"{wf.channel} capture ({len(wf.v)} samples)")
+    plt.title("Capture: " + ", ".join(waves[c].channel for c in chans))
+    if len(chans) > 1:
+        plt.legend()
     plt.grid(True, alpha=0.3)
     plt.savefig(path, dpi=110, bbox_inches="tight")
     plt.close()
     print(f"saved plot to {path}")
     return True
+
+
+def save_png(wf: Waveform, path: str) -> bool:
+    """Save a PNG plot of one waveform. Works with or without matplotlib."""
+    return _write_png({_channel_number(wf.channel): wf}, path)
 
 
 # ---------------------------------------------------------------------------
@@ -554,30 +744,11 @@ def ascii_plot_joint(waves: dict[int, Waveform], width: int = 70, height: int = 
 
 
 def save_png_joint(waves: dict[int, Waveform], path: str) -> bool:
-    """One PNG with every channel overlaid on a shared axis, with a legend."""
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print("matplotlib not installed - skipping joint PNG. Install it with "
-              "'pip install matplotlib', or use --plot for an ASCII plot.",
-              file=sys.stderr)
-        return False
-    chans = sorted(waves)
-    plt.figure(figsize=(10, 4.5))
-    for c in chans:
-        wf = waves[c]
-        plt.plot(wf.t, wf.v, linewidth=0.8, label=wf.channel)
-    plt.xlabel("time (s)")
-    plt.ylabel("volts")
-    plt.title("Joint capture: " + ", ".join(waves[c].channel for c in chans))
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.savefig(path, dpi=110, bbox_inches="tight")
-    plt.close()
-    print(f"saved joint plot to {path}")
-    return True
+    """One PNG with every channel overlaid on a shared voltage axis, with a legend.
+
+    Works with or without matplotlib (falls back to the built-in renderer).
+    """
+    return _write_png(waves, path)
 
 
 # ---------------------------------------------------------------------------

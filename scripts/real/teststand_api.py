@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+"""TestStand-facing API for the MSO44B (via the scope's raw Socket Server).
+
+This is a thin wrapper around bench_socket.py, shaped for NI TestStand's Python
+Module adapter. Every function here takes and returns ONLY primitive types
+(str / int / float / bool / list), so TestStand can bind them straight to
+sequence variables with no parsing.
+
+Requires: TestStand 2019 or newer (Python Module adapter). No VISA needed.
+
+
+HOW IT MAPS ONTO A TESTSTAND SEQUENCE
+-------------------------------------
+    Setup:      connect("169.254.8.134")            -> IDN string
+                configure("bench_full")             -> Boolean (pass/fail)
+
+    Main:       capture("1,2", 10000, True, 300)    -> Boolean (armed, waited, got data)
+                get_vpp(1)                          -> Number  <- put LIMITS on this
+                get_vmax(1)                         -> Number  <- and this
+                save_png("C:\\results\\wave.png")   -> String (path written)
+
+    Cleanup:    disconnect()
+
+
+PASS/FAIL vs ERROR
+------------------
+  - A returned False means "the test failed" (e.g. a setting did not read back).
+  - A raised exception means "something is broken" (e.g. cannot reach the scope).
+    TestStand turns that into a step error with the message attached.
+
+
+THREADING
+---------
+This module holds ONE open connection in a module-level session. That suits the
+normal case (one scope, one sequence). If you need several scopes at once, run
+them in separate TestStand processes, or ask for a handle-based API.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+# TestStand loads this module by file path, and depending on how it does that, this
+# file's own folder may NOT be on Python's import search path. Put it there first, so
+# "import bench_socket" always resolves to the bench_socket.py sitting next to us.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+import bench_socket as bs  # noqa: E402  (must come after the sys.path fix above)
+
+# ---------------------------------------------------------------------------
+# Module-level session state.
+# ---------------------------------------------------------------------------
+_scope: bs.SocketScope | None = None
+_waves: dict[int, bs.Waveform] = {}
+_config_report: str = ""
+
+
+def _require_scope() -> bs.SocketScope:
+    if _scope is None:
+        raise RuntimeError("Not connected. Call connect(host) first.")
+    return _scope
+
+
+def _require_wave(channel: int) -> bs.Waveform:
+    if channel not in _waves:
+        raise RuntimeError(
+            f"No captured data for CH{channel}. Call capture() first "
+            f"(captured channels: {sorted(_waves) or 'none'})."
+        )
+    return _waves[channel]
+
+
+def _parse_channels(channels: str) -> list[int]:
+    """'1,2' -> [1, 2]. Empty string -> []."""
+    return [int(c) for c in str(channels).split(",") if c.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Connection  (TestStand: Setup / Cleanup)
+# ---------------------------------------------------------------------------
+def connect(host: str, port: int = 4000) -> str:
+    """Open the connection to the scope. Returns the *IDN? identity string.
+
+    Raises if the scope cannot be reached (TestStand shows this as a step error).
+    """
+    global _scope, _waves, _config_report
+    disconnect()                      # drop any stale session first
+    _waves = {}
+    _config_report = ""
+    try:
+        _scope = bs.SocketScope(host, int(port))
+    except OSError as exc:
+        raise RuntimeError(
+            f"Cannot reach the scope at {host}:{port} - {exc}. "
+            f"Is the Socket Server ON (Utility -> I/O -> Socket Server, "
+            f"Protocol = Terminal)?"
+        ) from exc
+    return _scope.query("*IDN?")
+
+
+def disconnect() -> bool:
+    """Close the connection. Safe to call even if not connected. Always True."""
+    global _scope
+    if _scope is not None:
+        try:
+            _scope.close()
+        except Exception:
+            pass
+        _scope = None
+    return True
+
+
+def is_connected() -> bool:
+    """True if a session is currently open."""
+    return _scope is not None
+
+
+def identify() -> str:
+    """The scope's *IDN? string (requires an open connection)."""
+    return _require_scope().query("*IDN?")
+
+
+# ---------------------------------------------------------------------------
+# Configure  (TestStand: a Boolean pass/fail step)
+# ---------------------------------------------------------------------------
+def list_setups() -> list[str]:
+    """Names of the available named setups, e.g. ['default', 'bench', 'bench_full']."""
+    return list(bs.SETUPS)
+
+
+def configure(setup_name: str = "bench_full", channels: str = "") -> bool:
+    """Apply a named setup, then read EVERY setting back and check it landed.
+
+    channels : "1,2" to force specific channels, or "" to use the channels the
+               setup itself defines.
+
+    Returns True only if every setting read back correctly. Use get_config_report()
+    afterwards to put the detail into the TestStand report.
+    """
+    global _config_report
+    scope = _require_scope()
+
+    setup = bs.SETUPS.get(setup_name)
+    if setup is None:
+        raise ValueError(
+            f"Unknown setup {setup_name!r}. Available: {', '.join(bs.SETUPS)}"
+        )
+
+    chans = _parse_channels(channels) or sorted(setup.channels) or [1]
+    applied = bs.configure(scope, setup, chans)
+    results = bs.verify(scope, applied)
+
+    passed = sum(1 for r in results if r.ok)
+    lines = [
+        f"Setup '{setup.name}' applied to " + ", ".join(f"CH{c}" for c in chans),
+        "",
+    ]
+    width = max((len(r.label) for r in results), default=0)
+    for r in results:
+        mark = "PASS" if r.ok else "FAIL"
+        lines.append(f"[{mark}] {r.label:<{width}}  set {r.expected}  "
+                     f"readback {r.readback}")
+    lines.append("")
+    lines.append(f"{passed}/{len(results)} settings verified")
+    _config_report = "\n".join(lines)
+
+    return passed == len(results)
+
+
+def get_config_report() -> str:
+    """The PASS/FAIL table from the last configure(), as text for the report."""
+    return _config_report
+
+
+# ---------------------------------------------------------------------------
+# Capture  (TestStand: a Boolean step, then Number steps for the measurements)
+# ---------------------------------------------------------------------------
+def capture(channels: str = "1", points: int = 1000, single: bool = False,
+            timeout_s: float = 120.0) -> bool:
+    """Capture one or more channels and hold the data for the get_* functions.
+
+    channels  : "1" or "1,2" etc.
+    points    : samples to transfer (use the full record length, e.g. 10000).
+    single    : True  -> arm ONE acquisition and WAIT for the real trigger, then
+                         read it. Use this to catch a specific event.
+                 False -> just read whatever record is already in the scope's memory.
+    timeout_s : with single=True, how long to wait for the trigger + record.
+
+    Returns True if data came back for EVERY requested channel.
+    Raises if single=True and the trigger never fired (that is an error, not a
+    silent failure, so TestStand tells you).
+    """
+    global _waves
+    scope = _require_scope()
+    chans = _parse_channels(channels) or [1]
+
+    if single:
+        if not bs.arm_single(scope, float(timeout_s)):
+            raise TimeoutError(
+                f"No trigger within {timeout_s:g} s. Check the trigger level/slope, "
+                f"and that trigger mode is NORMal (in AUTO the scope self-triggers)."
+            )
+
+    _waves = bs.acquire_many(scope, chans, int(points))
+    return len(_waves) == len(chans)
+
+
+def captured_channels() -> list[int]:
+    """Which channels actually returned data on the last capture()."""
+    return sorted(_waves)
+
+
+# --- measurements: bind these to TestStand Number steps and apply LIMITS -----
+def get_vpp(channel: int = 1) -> float:
+    """Peak-to-peak volts."""
+    v = _require_wave(int(channel)).v
+    return float(max(v) - min(v))
+
+
+def get_vmax(channel: int = 1) -> float:
+    """Maximum volts."""
+    return float(max(_require_wave(int(channel)).v))
+
+
+def get_vmin(channel: int = 1) -> float:
+    """Minimum volts."""
+    return float(min(_require_wave(int(channel)).v))
+
+
+def get_mean(channel: int = 1) -> float:
+    """Mean (average) volts."""
+    v = _require_wave(int(channel)).v
+    return float(sum(v) / len(v))
+
+
+def get_sample_count(channel: int = 1) -> int:
+    """How many samples were transferred."""
+    return int(len(_require_wave(int(channel)).v))
+
+
+def get_dt(channel: int = 1) -> float:
+    """Seconds between consecutive samples (the sampling interval)."""
+    return float(_require_wave(int(channel)).dt)
+
+
+def get_t0(channel: int = 1) -> float:
+    """Time of the first sample, in seconds (negative = before the trigger)."""
+    return float(_require_wave(int(channel)).t0)
+
+
+def get_duration(channel: int = 1) -> float:
+    """Time from the first sample to the last, in seconds."""
+    wf = _require_wave(int(channel))
+    return float(wf.t[-1] - wf.t[0])
+
+
+# --- full arrays: bind to TestStand Number-array variables if you need them ---
+def get_volts(channel: int = 1) -> list[float]:
+    """Every sample, in volts."""
+    return [float(x) for x in _require_wave(int(channel)).v]
+
+
+def get_times(channel: int = 1) -> list[float]:
+    """The time of every sample, in seconds."""
+    return [float(x) for x in _require_wave(int(channel)).t]
+
+
+# ---------------------------------------------------------------------------
+# Saving artefacts  (TestStand: String steps - the returned path can be attached
+# to the report)
+# ---------------------------------------------------------------------------
+def save_csv(path: str) -> str:
+    """Save the captured data as CSV. Returns the path(s) written, semicolon-separated.
+
+    One channel  -> exactly the path you gave.
+    Several      -> path_CH1.csv, path_CH2.csv, ... plus a combined path_joint.csv.
+    """
+    if not _waves:
+        raise RuntimeError("Nothing captured. Call capture() first.")
+    _ensure_dir(path)
+    written: list[str] = []
+    multi = len(_waves) > 1
+    for c in sorted(_waves):
+        p = bs._derive(path, _waves[c].channel) if multi else path
+        bs.save_csv(_waves[c], p)
+        written.append(p)
+    if multi:
+        p = bs._derive(path, "joint")
+        bs.save_joint_csv(_waves, p)
+        written.append(p)
+    return ";".join(written)
+
+
+def save_png(path: str) -> str:
+    """Save a PNG plot. Returns the path(s) written, semicolon-separated.
+
+    One channel  -> exactly the path you gave.
+    Several      -> path_CH1.png, ... plus a combined overlay path_joint.png.
+
+    NO third-party packages are required. If matplotlib happens to be installed it
+    is used (nicer axes); otherwise a built-in pure-stdlib renderer writes the PNG.
+    Either way this works on a locked-down TestStand machine with nothing installed.
+    """
+    if not _waves:
+        raise RuntimeError("Nothing captured. Call capture() first.")
+
+    _ensure_dir(path)
+    written: list[str] = []
+    multi = len(_waves) > 1
+    for c in sorted(_waves):
+        p = bs._derive(path, _waves[c].channel) if multi else path
+        bs.save_png(_waves[c], p)
+        written.append(p)
+    if multi:
+        p = bs._derive(path, "joint")
+        bs.save_png_joint(_waves, p)
+        written.append(p)
+    return ";".join(written)
+
+
+def _ensure_dir(path: str) -> None:
+    folder = os.path.dirname(os.path.abspath(path))
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Raw SCPI escape hatch
+# ---------------------------------------------------------------------------
+def query(scpi: str) -> str:
+    """Send any SCPI query and return the reply, e.g. query("TRIGger:A:MODe?")."""
+    return _require_scope().query(str(scpi))
+
+
+def send(scpi: str) -> bool:
+    """Send any SCPI command (no reply expected). Always returns True."""
+    _require_scope().write(str(scpi))
+    return True
+
+
+def is_scope_running() -> bool:
+    """True if the scope is acquiring (so its record can be overwritten under you)."""
+    return bs.is_running(_require_scope())
+
+
+# ---------------------------------------------------------------------------
+# One-shot helpers - connect, do one thing, disconnect. Handy for a quick
+# TestStand step where you do not want to manage a session.
+# ---------------------------------------------------------------------------
+def quick_identify(host: str, port: int = 4000) -> str:
+    """Connect, read *IDN?, disconnect. Returns the identity string."""
+    connect(host, port)
+    try:
+        return identify()
+    finally:
+        disconnect()
+
+
+def quick_vpp(host: str, channel: int = 1, points: int = 1000,
+              port: int = 4000) -> float:
+    """Connect, read the current record on one channel, return its Vpp, disconnect."""
+    connect(host, port)
+    try:
+        capture(str(channel), points)
+        return get_vpp(channel)
+    finally:
+        disconnect()
