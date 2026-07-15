@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import socket
@@ -251,16 +252,34 @@ def _channel_number(channel: str) -> int:
 
 
 def configure(scope: SocketScope, setup: ScopeSetup,
-              channels: list[int] | None = None) -> list[Setting]:
+              channels: list[int] | None = None,
+              duration: float | None = None) -> list[Setting]:
     """Apply vertical/horizontal/trigger settings; return what was applied.
 
     Vertical settings (scale/offset/coupling) are PER-CHANNEL, so they're applied to
     every channel in `channels`. Horizontal and trigger settings are GLOBAL to the
     scope, so they're sent once regardless of how many channels are listed.
+
+    duration : total seconds across the screen. If given, it OVERRIDES the setup's
+        timebase: we hold the setup's sample rate fixed and derive both the s/div and
+        the record length from it, so the user thinks in one intuitive number
+        (seconds) instead of s/div + record length. This is the scope's own Manual-
+        mode relationship: record_length = sample_rate * duration, s/div = duration/10.
+        The named setup itself is left untouched (we override locally, not in place).
     """
     if channels is None:
         channels = sorted(setup.channels) or [1]
     settings: list[Setting] = []
+
+    # Effective timebase. Default to the setup's values; a duration override recomputes
+    # s/div and record length from it, keeping the setup's sample rate as the sampling
+    # resolution (more seconds -> more points, same points-per-second).
+    horizontal_scale = setup.horizontal_scale
+    record_length = setup.record_length
+    if duration is not None and duration > 0:
+        horizontal_scale = duration / 10.0                 # 10 divisions across the screen
+        if setup.sample_rate:
+            record_length = max(1, round(setup.sample_rate * duration))
 
     def apply(base: str, value: Any) -> None:
         scope.write(f"{base} {value}")
@@ -288,10 +307,10 @@ def configure(scope: SocketScope, setup: ScopeSetup,
         apply("HORizontal:MODE", setup.horizontal_mode)
     if setup.sample_rate:
         apply("HORizontal:SAMPLERate", setup.sample_rate)
-    if setup.horizontal_scale:
-        apply("HORizontal:SCAle", setup.horizontal_scale)
-    if setup.record_length:
-        apply("HORizontal:RECOrdlength", setup.record_length)
+    if horizontal_scale:
+        apply("HORizontal:SCAle", horizontal_scale)
+    if record_length:
+        apply("HORizontal:RECOrdlength", record_length)
     if setup.horizontal_position is not None:
         # Where the trigger sits horizontally, as a % of the record before it.
         apply("HORizontal:POSition", setup.horizontal_position)
@@ -414,14 +433,43 @@ def summarize(wf: Waveform) -> None:
     print(f"  Vpp  = {vmax - vmin:g} V  (min {vmin:g}, max {vmax:g})")
 
 
+# --- CSV formatting -------------------------------------------------------
+# One place that decides how numbers look, so every CSV (per-channel and joint)
+# is formatted identically and the columns line up.
+
+def _time_decimals(dt: float) -> int:
+    """How many decimal places to print for the time column.
+
+    Derived from the sample step dt so consecutive timestamps are distinguishable
+    AND every row uses the SAME number of decimals (an aligned, monotonic column
+    that never flips into scientific notation). ~3 extra digits below dt.
+    """
+    if not dt or dt <= 0:
+        return 9
+    return min(15, max(3, int(math.ceil(-math.log10(abs(dt)))) + 3))
+
+
+def _fmt_time(t: float, decimals: int) -> str:
+    return f"{t:.{decimals}f}"
+
+
+def _fmt_volts(v: float) -> str:
+    return f"{v:.6g}"
+
+
 def save_csv(wf: Waveform, path: str) -> None:
-    """Write the scaled waveform as CSV: index, time_s, volts."""
+    """Write one scaled waveform as CSV, columns: index, time_s, volts.
+
+    Rows are in time order; the time column uses a fixed decimal count (from dt) so
+    it stays aligned and readable in a spreadsheet.
+    """
     import csv
+    dec = _time_decimals(wf.dt)
     with open(path, "w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow(["index", "time_s", "volts"])
         for i, (t, v) in enumerate(zip(wf.t, wf.v)):
-            writer.writerow([i, f"{t:.9g}", f"{v:.6g}"])
+            writer.writerow([i, _fmt_time(t, dec), _fmt_volts(v)])
     print(f"saved {len(wf.v)} samples to {path}")
 
 
@@ -704,16 +752,21 @@ def acquire_many(scope: SocketScope, channels: list[int],
 
 
 def save_joint_csv(waves: dict[int, Waveform], path: str) -> None:
-    """One CSV holding every channel against a shared time column."""
+    """One CSV holding every channel against a shared time column.
+
+    Channels are laid out left-to-right in ascending order (CH1, CH2, ...); the time
+    column is formatted the same way as the per-channel files so everything aligns.
+    """
     import csv
     chans = sorted(waves)
     n = min(len(waves[c].v) for c in chans)
     t = waves[chans[0]].t
+    dec = _time_decimals(waves[chans[0]].dt)
     with open(path, "w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow(["index", "time_s"] + [f"{waves[c].channel}_volts" for c in chans])
         for i in range(n):
-            writer.writerow([i, f"{t[i]:.9g}"] + [f"{waves[c].v[i]:.6g}" for c in chans])
+            writer.writerow([i, _fmt_time(t[i], dec)] + [_fmt_volts(waves[c].v[i]) for c in chans])
     print(f"saved joint CSV ({len(chans)} channels x {n} samples) to {path}")
 
 
@@ -922,6 +975,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "captured separately AND combined into joint outputs.")
     parser.add_argument("--points", type=int, default=1000,
                         help="Number of samples to transfer for --capture. Default: 1000.")
+    parser.add_argument("--duration", type=float, default=None, metavar="SECONDS",
+                        help="With --configure: total seconds the capture should span. "
+                             "Overrides the setup's timebase - holds its sample rate and "
+                             "recomputes s/div and record length from the duration.")
     parser.add_argument("--single", action="store_true",
                         help="With --capture: arm ONE acquisition and wait for it to "
                              "complete before reading. Use this to deterministically "
@@ -941,8 +998,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="With --capture: ASCII plot in the terminal (no libraries). "
                              "Multi-channel also draws a joint overlay plot.")
     parser.add_argument("--plot-png", metavar="PNG", default=None,
-                        help="With --capture: save a PNG (needs matplotlib). Multi-channel "
-                             "writes one PNG per channel plus a joint overlay PNG.")
+                        help="With --capture: save a PNG. Uses matplotlib if installed, "
+                             "otherwise a built-in renderer (no packages needed). "
+                             "Multi-channel writes one PNG per channel plus a joint one.")
     parser.add_argument("--query", metavar="SCPI", default=None,
                         help="Send an arbitrary SCPI query and print the reply.")
     parser.add_argument("--send", metavar="SCPI", default=None,
@@ -1023,7 +1081,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg_channels = channels if (args.channels or args.channel is not None) \
                 else (sorted(setup.channels) or [1])
             print("IDN:", scope.query("*IDN?"))
-            applied = configure(scope, setup, cfg_channels)
+            applied = configure(scope, setup, cfg_channels, duration=args.duration)
             names = ", ".join(f"CH{c}" for c in cfg_channels)
             print(f"Applied {len(applied)} settings from setup '{setup.name}' to {names}. "
                   f"Reading them back:\n")

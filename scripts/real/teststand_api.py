@@ -56,6 +56,7 @@ import bench_socket as bs  # noqa: E402  (must come after the sys.path fix above
 _scope: bs.SocketScope | None = None
 _waves: dict[int, bs.Waveform] = {}
 _config_report: str = ""
+_record_length: int = 0        # points the last configure() set on the scope's record
 
 
 def _require_scope() -> bs.SocketScope:
@@ -131,16 +132,24 @@ def list_setups() -> list[str]:
     return list(bs.SETUPS)
 
 
-def configure(setup_name: str = "bench_full", channels: str = "") -> bool:
+def configure(setup_name: str = "bench_full", channels: str = "",
+              duration_s: float = 0.0) -> bool:
     """Apply a named setup, then read EVERY setting back and check it landed.
 
     channels : "1,2" to force specific channels, or "" to use the channels the
                setup itself defines.
+    duration_s : total seconds you want the capture to span. 0 = keep the setup's
+               own timebase. Any positive value OVERRIDES it: the scope's sample rate
+               is held fixed and the s/div and record length are recomputed from the
+               duration (record_length = sample_rate * duration_s). So you pick one
+               intuitive number - "I want a 10 second capture" - instead of juggling
+               s/div and record length. capture() then defaults to reading exactly
+               that many points, so the whole span comes back with no extra math.
 
     Returns True only if every setting read back correctly. Use get_config_report()
     afterwards to put the detail into the TestStand report.
     """
-    global _config_report
+    global _config_report, _record_length
     scope = _require_scope()
 
     setup = bs.SETUPS.get(setup_name)
@@ -150,8 +159,19 @@ def configure(setup_name: str = "bench_full", channels: str = "") -> bool:
         )
 
     chans = _parse_channels(channels) or sorted(setup.channels) or [1]
-    applied = bs.configure(scope, setup, chans)
+    dur = float(duration_s) if duration_s and duration_s > 0 else None
+    applied = bs.configure(scope, setup, chans, duration=dur)
     results = bs.verify(scope, applied)
+
+    # Remember the record length that actually landed, so capture() can default its
+    # transfer size to the full record instead of making the user recompute points.
+    _record_length = 0
+    for s in applied:
+        if s.label.upper().startswith("HORIZONTAL:RECO"):
+            try:
+                _record_length = int(float(s.expected))
+            except (TypeError, ValueError):
+                _record_length = 0
 
     passed = sum(1 for r in results if r.ok)
     lines = [
@@ -175,15 +195,27 @@ def get_config_report() -> str:
     return _config_report
 
 
+def get_record_length() -> int:
+    """Record length (points) the last configure() set. 0 if none was applied.
+
+    This is what capture() transfers by default, and (record_length / sample_rate)
+    is the total capture duration in seconds.
+    """
+    return int(_record_length)
+
+
 # ---------------------------------------------------------------------------
 # Capture  (TestStand: a Boolean step, then Number steps for the measurements)
 # ---------------------------------------------------------------------------
-def capture(channels: str = "1", points: int = 1000, single: bool = False,
+def capture(channels: str = "1", points: int = 0, single: bool = False,
             timeout_s: float = 120.0) -> bool:
     """Capture one or more channels and hold the data for the get_* functions.
 
     channels  : "1" or "1,2" etc.
-    points    : samples to transfer (use the full record length, e.g. 10000).
+    points    : samples to transfer. 0 (the default) means "the full record length
+                the last configure() set" - so a configure(duration_s=...) followed by
+                capture() returns the whole span automatically. Pass a positive number
+                to transfer only the first N samples.
     single    : True  -> arm ONE acquisition and WAIT for the real trigger, then
                          read it. Use this to catch a specific event.
                  False -> just read whatever record is already in the scope's memory.
@@ -197,6 +229,8 @@ def capture(channels: str = "1", points: int = 1000, single: bool = False,
     scope = _require_scope()
     chans = _parse_channels(channels) or [1]
 
+    n_points = int(points) if int(points) > 0 else (_record_length or 1000)
+
     if single:
         if not bs.arm_single(scope, float(timeout_s)):
             raise TimeoutError(
@@ -204,7 +238,7 @@ def capture(channels: str = "1", points: int = 1000, single: bool = False,
                 f"and that trigger mode is NORMal (in AUTO the scope self-triggers)."
             )
 
-    _waves = bs.acquire_many(scope, chans, int(points))
+    _waves = bs.acquire_many(scope, chans, n_points)
     return len(_waves) == len(chans)
 
 
@@ -249,6 +283,8 @@ def get_dt(channel: int = 1) -> float:
 def get_t0(channel: int = 1) -> float:
     """Time of the first sample, in seconds (negative = before the trigger)."""
     return float(_require_wave(int(channel)).t0)
+
+
 
 
 def get_duration(channel: int = 1) -> float:
