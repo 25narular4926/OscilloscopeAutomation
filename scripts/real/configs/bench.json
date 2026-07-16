@@ -1,0 +1,22 @@
+{
+  "_comment": "Matches the bench screenshot: CH1+CH2 at 5 V/div, 4 s/div, 250 S/s, 10 kpts, trigger on CH1 @ 6.8 V. Self-consistent: 250 S/s * 4 s/div * 10 div = 10,000 pts.",
+  "name": "bench",
+
+  "sample_rate": 250,
+  "record_length": 10000,
+  "horizontal_mode": null,
+  "horizontal_scale": 4.0,
+  "horizontal_position": 10.0,
+  "acquire_mode": null,
+
+  "trigger_mode": null,
+  "trigger_source": "CH1",
+  "trigger_level": 6.8,
+  "trigger_slope": "FALL",
+
+  "default_channel": { "scale": 5.0, "offset": 0.0, "coupling": "DC" },
+  "channels": {
+    "1": { "scale": 5.0, "offset": 0.0, "coupling": "DC" },
+    "2": { "scale": 5.0, "offset": 0.0, "coupling": "DC" }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "_comment": "Every setting readable from the scope's front-panel badges, transcribed exactly. Ch1/Ch2: 5 V/div, 1 MOhm, 500 MHz. Horizontal: 4 s/div (40 s total), 250 S/s, 10 kpts, position 10%. Trigger: CH1, 6.8 V. Acquisition: Manual, Sample.",
+  "name": "bench_full",
+
+  "horizontal_mode": "MANual",
+  "sample_rate": 250,
+  "horizontal_scale": 4.0,
+  "record_length": 10000,
+  "horizontal_position": 10.0,
+  "acquire_mode": "SAMple",
+
+  "trigger_mode": "NORMal",
+  "trigger_source": "CH1",
+  "trigger_level": 6.8,
+  "trigger_slope": "RISE",
+
+  "default_channel": { "scale": 5.0, "coupling": "DC", "termination": 1e6, "bandwidth": 500e6 },
+  "channels": {
+    "1": { "scale": 5.0, "coupling": "DC", "termination": 1e6, "bandwidth": 500e6 },
+    "2": { "scale": 5.0, "coupling": "DC", "termination": 1e6, "bandwidth": 500e6 }
+  }
+}

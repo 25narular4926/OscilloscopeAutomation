@@ -216,10 +216,53 @@ def arm() -> bool:
 def is_acquisition_complete() -> bool:
     """True once the armed acquisition has finished (the scope has stopped).
 
-    Poll this after the event if you want to be sure the record is fully captured
-    before you read it; False means the scope is still armed/acquiring.
+    This is a one-shot snapshot of the scope's state RIGHT NOW - it does NOT wait. Call
+    it once and it returns immediately: True if the record is already complete, False if
+    the scope is still armed/acquiring. To actually wait for the record, use
+    wait_until_complete() instead (or loop on this in TestStand).
     """
     return not bs.is_running(_require_scope())
+
+
+def wait_until_complete(timeout_s: float = 120.0) -> bool:
+    """Block until the armed acquisition finishes (the record is complete), then return.
+
+    Put this step AFTER the waveform-generation step and BEFORE capture(). It waits
+    exactly as long as the record needs - no more, no less - regardless of when in the
+    event the trigger fired.
+
+    Returns True once the scope has stopped (record complete). Raises TimeoutError if it
+    never completes within timeout_s, which almost always means the trigger never fired
+    (check the trigger level/slope/source, or that the signal crossed the threshold).
+    """
+    scope = _require_scope()
+    if not bs.wait_until_stopped(scope, float(timeout_s)):
+        raise TimeoutError(
+            f"Acquisition did not complete within {timeout_s:g} s. The trigger likely "
+            f"never fired - check the trigger level/slope/source, or that the event "
+            f"actually crossed the trigger threshold."
+        )
+    return True
+
+
+def snapshot_config(name: str, channels: str = "") -> str:
+    """Read the scope's CURRENT front-panel settings and save them as configs/<name>.json.
+
+    This is the "tune by hand, then freeze it" step: dial the scope in manually, run
+    this once, and from then on configure(name) reproduces exactly those settings. The
+    inverse of configure().
+
+    channels : "1,2" to capture specific channels, or "" to auto-detect the ones that
+               are currently displayed on the scope.
+
+    Returns the path of the JSON file written. Reloads the setups so the new one is
+    immediately usable via configure(name) in this same session.
+    """
+    scope = _require_scope()
+    chans = _parse_channels(channels) or None
+    path = bs.snapshot_to_configs(scope, str(name), chans)
+    bs.SETUPS = bs.load_setups()      # make the just-saved setup available right away
+    return path
 
 
 def get_record_length() -> int:

@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import re
@@ -155,86 +156,73 @@ class ScopeSetup:
 
 
 # ---------------------------------------------------------------------------
-# Named setups. Pick one with  --setup <name>  ;  list them with --list-setups.
-# Add your own here — it's just a dict entry.
+# Named setups live as EDITABLE JSON files in the configs/ folder next to this
+# script (one file per setup: configs/<name>.json). Edit a value there and re-run;
+# nothing here needs to change. Add a new setup by dropping in a new .json file.
+#
+# JSON schema (all fields optional; null or omitted = leave that setting alone):
+#   {
+#     "name": "bench_full",                 # defaults to the filename if omitted
+#     "sample_rate": 250, "record_length": 10000, "horizontal_scale": 4.0,
+#     "horizontal_mode": "MANual", "horizontal_position": 10.0, "acquire_mode": "SAMple",
+#     "trigger_mode": "NORMal", "trigger_source": "CH1",
+#     "trigger_level": 6.8, "trigger_slope": "RISE",
+#     "default_channel": { "scale": 5.0, "coupling": "DC", ... },
+#     "channels": { "1": { "scale": 5.0, ... }, "2": { ... } }
+#   }
+# Any key starting with "_" (e.g. "_comment") is ignored, so you can annotate freely.
 # ---------------------------------------------------------------------------
-SETUPS: dict[str, ScopeSetup] = {
-    # Generic fast-timebase default (what the script shipped with).
-    "default": ScopeSetup(
-        name="default",
-        channels={1: ChannelSetup(scale=0.5, offset=0.0, coupling="DC")},
-        default_channel=ChannelSetup(scale=0.5, offset=0.0, coupling="DC"),
-        sample_rate=1.25e9,
-        record_length=100_000,
-        horizontal_position=10.0,     # trigger 10% in from the left (Tek default)
-        trigger_source="CH1",
-        trigger_level=1.0,
-        trigger_slope="RISE",
-    ),
+CONFIGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
 
-    # Matches the bench screenshot: CH1+CH2 at 5 V/div, 4 s/div, 250 S/s,
-    # 10 kpts, trigger on CH1 @ 6.8 V.
-    # Note these three are self-consistent: 250 S/s * 4 s/div * 10 div = 10,000 pts.
-    "bench": ScopeSetup(
-        name="bench",
-        channels={
-            1: ChannelSetup(scale=5.0, offset=0.0, coupling="DC"),
-            2: ChannelSetup(scale=5.0, offset=0.0, coupling="DC"),
-        },
-        default_channel=ChannelSetup(scale=5.0, offset=0.0, coupling="DC"),
-        sample_rate=250,
-        horizontal_scale=4.0,
-        record_length=10_000,
-        horizontal_position=10.0,     # the "10%" shown in the Horizontal panel
-        trigger_source="CH1",
-        trigger_level=6.8,
-        trigger_slope="FALL",   # flip to "RISE" if your trigger is rising-edge
-    ),
+_CHANNEL_FIELDS = ("scale", "offset", "coupling", "termination", "bandwidth")
+_SETUP_FIELDS = ("horizontal_mode", "sample_rate", "horizontal_scale", "record_length",
+                 "horizontal_position", "acquire_mode", "trigger_mode", "trigger_source",
+                 "trigger_level", "trigger_slope")
 
-    # ---------------------------------------------------------------------
-    # "bench_full" — every setting readable from the scope's front-panel
-    # badges, transcribed exactly:
-    #
-    #   Ch 1 / Ch 2   5 V/div, 1 MOhm, 500 MHz
-    #   Horizontal    4 s/div (40 s total), SR 250 S/s, 4 ms/pt,
-    #                 RL 10 kpts, position 10%
-    #   Trigger       CH1, falling edge, 6.8 V
-    #   Acquisition   Manual, Sample
-    #
-    # Cross-check: 250 S/s * 4 s/div * 10 div = 10,000 pts, and 1/250 = 4 ms/pt.
-    # Both agree with the badges, so the numbers are self-consistent.
-    #
-    # Not set here (not shown in the badges / no reliable SCPI):
-    #   - vertical offset (not on the badge, so we leave it alone)
 
-    # python bench_socket.py --host 169.254.8.134 --capture --single --channels 1,2 --points 10000 --save wave.csv --plot-png wave.png --timeout 180
+def _channel_from_dict(d: dict) -> ChannelSetup:
+    return ChannelSetup(**{k: d[k] for k in _CHANNEL_FIELDS if d.get(k) is not None})
 
-    #   - "12 bits" ADC resolution and "1 Acqs" (informational)
-    # ---------------------------------------------------------------------
-    "bench_full": ScopeSetup(
-        name="bench_full",
-        channels={
-            1: ChannelSetup(scale=5.0, coupling="DC", termination=1e6, bandwidth=500e6),
-            2: ChannelSetup(scale=5.0, coupling="DC", termination=1e6, bandwidth=500e6),
-        },
-        default_channel=ChannelSetup(scale=5.0, coupling="DC",
-                                     termination=1e6, bandwidth=500e6),
-        horizontal_mode="MANual",     # the "Manual" in the Acquisition badge
-        sample_rate=250,              # SR: 250 S/s   (=> 4 ms/pt)
-        horizontal_scale=4.0,         # 4 s/div       (=> 40 s across the screen)
-        record_length=10_000,         # RL: 10 kpts
-        horizontal_position=10.0,     # 10%
-        acquire_mode="SAMple",        # "Sample" in the Acquisition badge
-        # NORMal, not AUTO: in AUTO the scope force-triggers after a timeout, so a
-        # --single acquisition can complete without your event ever occurring.
-        trigger_mode="NORMal",
-        trigger_source="CH1",
-        trigger_level=6.8,
-        trigger_slope="RISE",         # the falling-edge icon on the Trigger badge
-    ),
-}
 
-DEFAULT_SETUP = SETUPS["default"]   # kept for backwards compatibility
+def _setup_from_dict(data: dict, fallback_name: str) -> ScopeSetup:
+    channels = {int(n): _channel_from_dict(cs)
+                for n, cs in (data.get("channels") or {}).items()}
+    default_channel = _channel_from_dict(data.get("default_channel") or {})
+    kwargs = {k: data[k] for k in _SETUP_FIELDS if data.get(k) is not None}
+    return ScopeSetup(name=data.get("name") or fallback_name,
+                      channels=channels, default_channel=default_channel, **kwargs)
+
+
+def load_setups(configs_dir: str = CONFIGS_DIR) -> dict[str, ScopeSetup]:
+    """Load every configs/<name>.json into a {name: ScopeSetup} dict.
+
+    The folder is the single source of truth for named setups. A missing folder or a
+    malformed file is reported (to stderr) rather than silently ignored, so a typo in a
+    config surfaces instead of a setup mysteriously vanishing.
+    """
+    setups: dict[str, ScopeSetup] = {}
+    if not os.path.isdir(configs_dir):
+        print(f"WARNING: configs folder not found: {configs_dir}\n"
+              f"         No named setups loaded. Create it with <name>.json files.",
+              file=sys.stderr)
+        return setups
+    for fn in sorted(os.listdir(configs_dir)):
+        if not fn.lower().endswith(".json"):
+            continue
+        path = os.path.join(configs_dir, fn)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            setup = _setup_from_dict(data, os.path.splitext(fn)[0])
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            print(f"WARNING: skipping bad config {fn}: {exc}", file=sys.stderr)
+            continue
+        setups[setup.name] = setup
+    return setups
+
+
+SETUPS: dict[str, ScopeSetup] = load_setups()
+DEFAULT_SETUP = SETUPS.get("default")   # kept for backwards compatibility (may be None)
 
 
 @dataclass
@@ -382,6 +370,103 @@ def report(results: list[CheckResult]) -> bool:
     return passed == total
 
 
+# ---------------------------------------------------------------------------
+# Snapshot — the INVERSE of configure(). You dial the scope in by hand on the
+# front panel, then read those exact settings back off it and freeze them into a
+# configs/<name>.json. From then on that file drives the setup (no re-tuning).
+# ---------------------------------------------------------------------------
+def _q_num(scope: SocketScope, query: str) -> float | None:
+    """Query a numeric setting; None if the scope has nothing sensible to give."""
+    try:
+        return _to_float(scope.query(query))
+    except ValueError:
+        return None
+
+
+def _q_str(scope: SocketScope, query: str) -> str | None:
+    """Query a keyword setting (coupling, mode, slope...); None if empty."""
+    s = scope.query(query).strip().strip('"')
+    return s or None
+
+
+def _channel_on(scope: SocketScope, n: int) -> bool:
+    return scope.query(f"SELect:CH{n}?").strip() in ("1", "ON")
+
+
+def read_setup(scope: SocketScope, channels: list[int] | None = None,
+               name: str = "snapshot", max_channels: int = 4) -> ScopeSetup:
+    """Read the scope's CURRENT settings and build a ScopeSetup from them.
+
+    channels : which channels to capture. None = auto-detect the ones that are
+               displayed (SELect:CH<n>? == 1), falling back to CH1.
+    """
+    if channels is None:
+        channels = [n for n in range(1, max_channels + 1) if _channel_on(scope, n)] or [1]
+
+    chan_setups: dict[int, ChannelSetup] = {}
+    for n in channels:
+        chan_setups[n] = ChannelSetup(
+            scale=_q_num(scope, f"CH{n}:SCAle?"),
+            offset=_q_num(scope, f"CH{n}:OFFSet?"),
+            coupling=_q_str(scope, f"CH{n}:COUPling?"),
+            termination=_q_num(scope, f"CH{n}:TERmination?"),
+            bandwidth=_q_num(scope, f"CH{n}:BANdwidth?"),
+        )
+
+    trig_source = _q_str(scope, "TRIGger:A:EDGE:SOUrce?")
+    tn = _channel_number(trig_source) if trig_source else 1
+    rl = _q_num(scope, "HORizontal:RECOrdlength?")
+    return ScopeSetup(
+        name=name,
+        channels=chan_setups,
+        default_channel=chan_setups.get(channels[0], ChannelSetup()),
+        horizontal_mode=_q_str(scope, "HORizontal:MODE?"),
+        sample_rate=_q_num(scope, "HORizontal:SAMPLERate?"),
+        horizontal_scale=_q_num(scope, "HORizontal:SCAle?"),
+        record_length=int(rl) if rl is not None else None,
+        horizontal_position=_q_num(scope, "HORizontal:POSition?"),
+        acquire_mode=_q_str(scope, "ACQuire:MODe?"),
+        trigger_mode=_q_str(scope, "TRIGger:A:MODe?"),
+        trigger_source=trig_source,
+        trigger_level=_q_num(scope, f"TRIGger:A:LEVel:CH{tn}?"),
+        trigger_slope=_q_str(scope, "TRIGger:A:EDGE:SLOpe?"),
+    )
+
+
+def _channel_to_dict(cs: ChannelSetup) -> dict:
+    return {k: getattr(cs, k) for k in _CHANNEL_FIELDS if getattr(cs, k) is not None}
+
+
+def setup_to_dict(setup: ScopeSetup) -> dict:
+    """Serialize a ScopeSetup into the configs/*.json schema (round-trips load_setups)."""
+    d: dict[str, Any] = {"name": setup.name}
+    for f in _SETUP_FIELDS:
+        d[f] = getattr(setup, f)
+    d["default_channel"] = _channel_to_dict(setup.default_channel)
+    d["channels"] = {str(n): _channel_to_dict(cs)
+                     for n, cs in sorted(setup.channels.items())}
+    return d
+
+
+def save_setup_json(setup: ScopeSetup, path: str) -> str:
+    """Write a ScopeSetup to a JSON file; returns the path written."""
+    folder = os.path.dirname(os.path.abspath(path))
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(setup_to_dict(setup), fh, indent=2)
+        fh.write("\n")
+    print(f"saved setup '{setup.name}' to {path}")
+    return path
+
+
+def snapshot_to_configs(scope: SocketScope, name: str,
+                        channels: list[int] | None = None,
+                        configs_dir: str = CONFIGS_DIR) -> str:
+    """Read the scope's live settings and save them as configs/<name>.json."""
+    setup = read_setup(scope, channels, name=name)
+    return save_setup_json(setup, os.path.join(configs_dir, f"{name}.json"))
+
 
 @dataclass
 class Waveform:
@@ -410,8 +495,25 @@ def _to_float(text: str) -> float:
         raise ValueError(f"could not parse a number from scope reply: {text!r}")
 
 
+def _query_nonempty(scope: SocketScope, cmd: str, tries: int = 3, delay: float = 0.3) -> str:
+    """Query, retrying while the reply is empty (rides out a transient Terminal-mode
+    timing hiccup). Returns '' if it is still empty after all tries."""
+    for i in range(tries):
+        reply = scope.query(cmd).strip()
+        if reply:
+            return reply
+        if i < tries - 1:
+            time.sleep(delay)
+    return ""
+
+
 def acquire(scope: SocketScope, channel: int = 1, points: int = 1000) -> Waveform | None:
-    """Pull an ASCII curve off a channel and scale it to a Waveform (None if empty)."""
+    """Pull an ASCII curve off a channel and scale it to a Waveform.
+
+    Returns None (rather than raising) when the source has no waveform to describe - the
+    channel is off, or the read happened before the record was ready. acquire_many() then
+    skips that channel with a note instead of failing the whole capture.
+    """
     source = f"CH{channel}"
     scope.write(f"DATa:SOURce {source}")
     scope.write("DATa:ENCdg ASCii")          # ASCII so the curve comes back as text
@@ -419,7 +521,14 @@ def acquire(scope: SocketScope, channel: int = 1, points: int = 1000) -> Wavefor
     scope.write(f"DATa:STOP {points}")
 
     def qf(field: str) -> float:
-        return _to_float(scope.query(f"WFMOutpre:{field}?"))
+        return _to_float(_query_nonempty(scope, f"WFMOutpre:{field}?"))
+
+    # XINCR is the first preamble field. An empty reply means there is no waveform on this
+    # source yet - bail out cleanly instead of crashing on float('').
+    if not _query_nonempty(scope, "WFMOutpre:XINCR?"):
+        print(f"CH{channel}: empty preamble - channel not displayed, or the record was not "
+              f"ready (did the acquisition complete before this read?).", file=sys.stderr)
+        return None
 
     xincr = qf("XINCR")
     xzero = qf("XZERO")
@@ -856,6 +965,21 @@ def is_running(scope: SocketScope) -> bool:
     return scope.query("ACQuire:STATE?").strip().upper() in ("1", "ON", "RUN")
 
 
+def wait_until_stopped(scope: SocketScope, timeout: float = 120.0,
+                       poll: float = 0.5) -> bool:
+    """Block until the scope has STOPPED acquiring (the record is complete), or timeout.
+
+    Returns True the moment acquisition finishes; False if it never stops within `timeout`
+    (which usually means the trigger never fired, so the record was never written).
+    """
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        if not is_running(scope):
+            return True
+        time.sleep(poll)      # explicit interval - do not spin on the scope
+    return False
+
+
 def free_run(scope: SocketScope, timeout: float = 60.0, poll: float = 0.5) -> bool:
     """Put the scope in continuous AUTO acquisition and wait for ONE fresh record.
 
@@ -1003,6 +1127,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "See --list-setups.")
     parser.add_argument("--list-setups", action="store_true",
                         help="Print the available named setups and exit.")
+    parser.add_argument("--snapshot", metavar="NAME", default=None,
+                        help="Read the scope's CURRENT front-panel settings and save them "
+                             "as configs/NAME.json (the inverse of --configure). Use "
+                             "--channels to pick channels, else the displayed ones are used.")
     parser.add_argument("--capture", action="store_true",
                         help="Pull an ASCII waveform off a channel and summarise it.")
     parser.add_argument("--channel", type=int, default=None,
@@ -1108,6 +1236,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.query:
             print(scope.query(args.query, debug=args.debug))
+            return 0
+        if args.snapshot:
+            # User-specified channels win; otherwise auto-detect the displayed ones.
+            snap_channels = channels if (args.channels or args.channel is not None) else None
+            print("IDN:", scope.query("*IDN?"))
+            snapshot_to_configs(scope, args.snapshot, snap_channels)
+            print(f"Snapshot saved. Use it with: --setup {args.snapshot}  "
+                  f"(or configure('{args.snapshot}') in TestStand).")
             return 0
         if args.configure:
             setup = SETUPS.get(args.setup)
