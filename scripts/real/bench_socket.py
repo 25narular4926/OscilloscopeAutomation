@@ -864,24 +864,38 @@ def free_run(scope: SocketScope, timeout: float = 60.0, poll: float = 0.5) -> bo
     return False
 
 
-def arm_single(scope: SocketScope, timeout: float = 120.0, poll: float = 0.5) -> bool:
-    """Arm exactly ONE acquisition and block until it completes.
+def arm_acquisition(scope: SocketScope) -> bool:
+    """Arm ONE acquisition and return IMMEDIATELY (does not wait for the trigger).
 
-    STOPAfter SEQuence makes the scope stop after a single record, so we can poll
-    ACQuire:STATE? until it reports stopped. Returns False if it never completed
-    within `timeout` (i.e. the trigger never fired).
+    Use this to catch an event that happens AFTER you arm: the scope waits for the
+    trigger, captures a single record, and STOPS (freezes) it. The armed state lives
+    on the scope itself, so the event is captured even if nothing is polling - you can
+    read the frozen record later with a plain capture (single=False). Returns True
+    once the arm command is sent.
     """
-    # In AUTO mode the scope force-triggers after a timeout, so the acquisition would
-    # complete even if your event never happened. Warn loudly - this is a trap.
+    # In AUTO mode the scope force-triggers after a timeout, so the record can fill
+    # WITHOUT your event ever happening. Warn loudly - this is a trap.
     mode = scope.query("TRIGger:A:MODe?").strip().upper()
     if mode.startswith("AUTO"):
         print("WARNING: trigger mode is AUTO. The scope will trigger by itself after a\n"
-              "         timeout, so the capture may complete WITHOUT your event.\n"
+              "         timeout, so the record may fill WITHOUT your event.\n"
               "         Use a setup with trigger_mode='NORMal' (e.g. --setup bench_full),\n"
               "         or send: --query \"TRIGger:A:MODe NORMal\"", file=sys.stderr)
 
     scope.write("ACQuire:STOPAfter SEQuence")   # one shot, do not free-run
-    scope.write("ACQuire:STATE RUN")            # arm it
+    scope.write("ACQuire:STATE RUN")            # arm it; returns without waiting
+    return True
+
+
+def arm_single(scope: SocketScope, timeout: float = 120.0, poll: float = 0.5) -> bool:
+    """Arm exactly ONE acquisition and BLOCK until it completes.
+
+    Same arm as arm_acquisition(), then polls ACQuire:STATE? until the scope reports
+    stopped. Returns False if it never completed within `timeout` (the trigger never
+    fired). Only use this when the event occurs DURING this call; if the event happens
+    later (e.g. a separate step generates it), use arm_acquisition() before it instead.
+    """
+    arm_acquisition(scope)
     start = time.monotonic()
     while time.monotonic() - start < timeout:
         if not is_running(scope):

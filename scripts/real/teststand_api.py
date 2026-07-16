@@ -195,6 +195,33 @@ def get_config_report() -> str:
     return _config_report
 
 
+def arm() -> bool:
+    """Arm the scope for ONE acquisition and return immediately (does NOT wait).
+
+    Call this BEFORE the event/waveform is generated. The scope then waits for the
+    trigger, captures a single record, and freezes it - even while your sequence moves
+    on to the generation step. Afterwards, read that frozen record with
+    capture(single=False), then save().
+
+    Typical TestStand order:
+        connect -> configure -> arm -> [generate waveform] -> capture(single=False)
+        -> save -> disconnect
+
+    Returns True once armed. Requires a prior configure() so the trigger mode is NORMal
+    (in AUTO the scope self-triggers and may freeze a record WITHOUT your event).
+    """
+    return bs.arm_acquisition(_require_scope())
+
+
+def is_acquisition_complete() -> bool:
+    """True once the armed acquisition has finished (the scope has stopped).
+
+    Poll this after the event if you want to be sure the record is fully captured
+    before you read it; False means the scope is still armed/acquiring.
+    """
+    return not bs.is_running(_require_scope())
+
+
 def get_record_length() -> int:
     """Record length (points) the last configure() set. 0 if none was applied.
 
