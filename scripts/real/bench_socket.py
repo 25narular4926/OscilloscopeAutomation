@@ -44,6 +44,12 @@ class SocketScope:
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(1.0)      # per-read timeout used to detect "reply done"
         self._drain()                  # discard any connect-time banner / prompt
+        # Bare query responses. With HEADer ON the scope prefixes replies with the
+        # command path (":WFMOUTPRE:XZERO -2.0E-3"), which float() can't parse - this is
+        # THE classic "could not convert string to float" on the WFMOutpre reads. Force
+        # it off (and VERBose off for terse values) once per session.
+        self.write("HEADer OFF")
+        self.write("VERBose OFF")
 
     def _drain(self) -> None:
         """Read and throw away whatever is already waiting (banner, stale prompt)."""
@@ -386,6 +392,24 @@ class Waveform:
     t0: float
 
 
+def _to_float(text: str) -> float:
+    """Parse a scope numeric reply, tolerating a stray HEADer prefix.
+
+    'HEADer OFF' at connect normally means replies are bare (e.g. '-2.0E-3'). This is a
+    backstop for the case where headers slip back on and the reply arrives as
+    ':WFMOUTPRE:XZERO -2.0E-3' - we take the last whitespace-separated token, then fall
+    back to pulling the first number out of the string.
+    """
+    s = text.strip()
+    try:
+        return float(s.split()[-1]) if s else float(s)
+    except ValueError:
+        m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", s)
+        if m:
+            return float(m.group())
+        raise ValueError(f"could not parse a number from scope reply: {text!r}")
+
+
 def acquire(scope: SocketScope, channel: int = 1, points: int = 1000) -> Waveform | None:
     """Pull an ASCII curve off a channel and scale it to a Waveform (None if empty)."""
     source = f"CH{channel}"
@@ -395,7 +419,7 @@ def acquire(scope: SocketScope, channel: int = 1, points: int = 1000) -> Wavefor
     scope.write(f"DATa:STOP {points}")
 
     def qf(field: str) -> float:
-        return float(scope.query(f"WFMOutpre:{field}?"))
+        return _to_float(scope.query(f"WFMOutpre:{field}?"))
 
     xincr = qf("XINCR")
     xzero = qf("XZERO")
