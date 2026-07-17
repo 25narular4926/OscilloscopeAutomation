@@ -1,0 +1,23 @@
+{
+  "_comment": "1 kHz pulse, 5 Vpp, 2.5 V offset (0-5 V swing), 50% duty, high-Z load, on CH1. A simple digital-like stimulus. Output stays OFF until output_on.",
+  "name": "pulse_1k_50duty",
+
+  "default_channel": {
+    "shape": "PULSe",
+    "frequency": 1000,
+    "amplitude": 5.0,
+    "offset": 2.5,
+    "duty_cycle": 50.0,
+    "impedance": "INF"
+  },
+  "channels": {
+    "1": {
+      "shape": "PULSe",
+      "frequency": 1000,
+      "amplitude": 5.0,
+      "offset": 2.5,
+      "duty_cycle": 50.0,
+      "impedance": "INF"
+    }
+  }
+}

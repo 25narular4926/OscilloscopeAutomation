@@ -1,0 +1,21 @@
+{
+  "_comment": "1 kHz sine, 2 Vpp, 0 V offset, 50 ohm load, on CH1. Edit any value and re-run. Output stays OFF until you call output_on - configure never enables it.",
+  "name": "sine_1k",
+
+  "default_channel": {
+    "shape": "SIN",
+    "frequency": 1000,
+    "amplitude": 2.0,
+    "offset": 0.0,
+    "impedance": 50
+  },
+  "channels": {
+    "1": {
+      "shape": "SIN",
+      "frequency": 1000,
+      "amplitude": 2.0,
+      "offset": 0.0,
+      "impedance": 50
+    }
+  }
+}
