@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Minimal function-generator flow: connect, set the waveform, turn the output on.
+"""Minimal function-generator flow: connect, set waveforms, turn the outputs on.
 
-No command-line flags - edit the values in the CONFIG block below and run. This drives
-the AFG through teststand_api.py the same way a TestStand sequence would.
+No command-line flags - edit the CONFIG block below and run. Drives one or more channels
+of the AFG through teststand_api.py the same way a TestStand sequence would.
 
   python example_flow.py
 
-The output is left ON when the script finishes (so the signal keeps driving your bench).
-To switch it off later:  python afg_socket.py --host <ip> --all-off
+The outputs are left ON when the script finishes (so the signals keep driving your bench).
+To switch them off later:  python afg_socket.py --host <ip> --port 5025 --all-off
 """
 
 import os
@@ -21,35 +21,41 @@ if _HERE not in sys.path:
 import teststand_api as afg
 
 # ---- CONFIG: edit these ---------------------------------------------------
-HOST      = "169.254.8.135"   # AFG IP address
-CHANNEL   = 1                 # which output to drive
-SHAPE     = "SIN"             # SIN | SQUare | RAMP | PULSe
-FREQUENCY = 1000.0            # Hz
-AMPLITUDE = 2.0               # Vpp
-OFFSET    = 0.0               # volts
-DUTY      = 0.0               # percent (pulse/square only; 0 = ignore)
+HOST = "169.254.8.135"   # AFG IP address
+PORT = 5025              # LXI raw-SCPI socket (confirmed working on the AFG31000)
+
+# One entry per channel you want to drive. Add or remove channels here; each is
+# configured and switched on independently. shape: SIN | SQUare | RAMP | PULSe.
+CHANNELS = {
+    1: {"shape": "SIN",    "frequency": 1000.0, "amplitude": 2.0, "offset": 0.0, "duty": 0.0},
+    2: {"shape": "SQUare", "frequency": 1000.0, "amplitude": 2.0, "offset": 0.0, "duty": 50.0},
+}
 # ---------------------------------------------------------------------------
 
 
 def main() -> None:
     # 1. Connect.
-    idn = afg.connect(HOST)
+    idn = afg.connect(HOST, PORT)
     print("connect ->", idn.strip())
 
-    # 2. Configure / set the waveform on the channel, and verify it landed.
-    ok = afg.set_waveform(CHANNEL, SHAPE, FREQUENCY, AMPLITUDE, OFFSET, DUTY)
-    print(f"set_waveform(CH{CHANNEL}) -> {ok}")
-    print(afg.get_config_report())
+    # 2. Set the waveform on every channel, and verify each landed.
+    for ch, w in CHANNELS.items():
+        ok = afg.set_waveform(ch, w["shape"], w["frequency"], w["amplitude"],
+                              w["offset"], w["duty"])
+        print(f"set_waveform(CH{ch}) -> {ok}")
+        print(afg.get_config_report())
 
-    # 3. Output the waveform (switch the output ON). Drives real hardware.
-    afg.output_on(CHANNEL)
-    print(f"output_on({CHANNEL}) -> is_on = {afg.output_is_on(CHANNEL)}")
-    print(f"CH{CHANNEL} is now driving {AMPLITUDE:g} Vpp {SHAPE} at {FREQUENCY:g} Hz.")
+    # 3. Output every channel (switch each output ON). Drives real hardware.
+    for ch in CHANNELS:
+        afg.output_on(ch)
+        print(f"output_on({ch}) -> is_on = {afg.output_is_on(ch)}")
 
-    # 4. Disconnect. This closes the socket only - it does NOT switch the output off,
-    #    so the AFG keeps driving the signal after the script exits.
+    for ch, w in CHANNELS.items():
+        print(f"CH{ch}: {w['amplitude']:g} Vpp {w['shape']} at {w['frequency']:g} Hz")
+
+    # 4. Disconnect. Closes the socket only - the outputs stay ON.
     afg.disconnect()
-    print("disconnect -> done (output stays ON)")
+    print("disconnect -> done (outputs stay ON)")
 
 
 if __name__ == "__main__":
