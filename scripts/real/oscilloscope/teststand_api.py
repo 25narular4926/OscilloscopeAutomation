@@ -15,8 +15,8 @@ HOW IT MAPS ONTO A TESTSTAND SEQUENCE
                 configure("bench_full")             -> Boolean (pass/fail)
 
     Main:       capture("1,2", 10000, True, 300)    -> Boolean (armed, waited, got data)
-                get_vpp(1)                          -> Number  <- put LIMITS on this
-                get_vmax(1)                         -> Number  <- and this
+                get_vmax(1)                         -> Number  <- put LIMITS on this
+                get_vmin(1)                         -> Number  <- and this
                 save_png("C:\\results\\wave.png")   -> String (path written)
 
     Cleanup:    disconnect()
@@ -318,12 +318,6 @@ def captured_channels() -> list[int]:
 
 
 # --- measurements: bind these to TestStand Number steps and apply LIMITS -----
-def get_vpp(channel: int = 1) -> float:
-    """Peak-to-peak volts."""
-    v = _require_wave(int(channel)).v
-    return float(max(v) - min(v))
-
-
 def get_vmax(channel: int = 1) -> float:
     """Maximum volts."""
     return float(max(_require_wave(int(channel)).v))
@@ -338,6 +332,16 @@ def get_mean(channel: int = 1) -> float:
     """Mean (average) volts."""
     v = _require_wave(int(channel)).v
     return float(sum(v) / len(v))
+
+
+def get_rms(channel: int = 1) -> float:
+    """RMS (root-mean-square) volts: sqrt(mean(v^2)) over the whole record.
+
+    This is the true RMS of the captured samples, so it works for any shape (sine,
+    square, pulse, noise), not just a sine wave.
+    """
+    v = _require_wave(int(channel)).v
+    return float((sum(x * x for x in v) / len(v)) ** 0.5)
 
 
 def get_sample_count(channel: int = 1) -> int:
@@ -361,6 +365,65 @@ def get_duration(channel: int = 1) -> float:
     """Time from the first sample to the last, in seconds."""
     wf = _require_wave(int(channel))
     return float(wf.t[-1] - wf.t[0])
+
+
+def _percentile(sorted_vals: list[float], pct: float) -> float:
+    """Linear-interpolation percentile of an ALREADY-SORTED list (pct in 0..100)."""
+    if not sorted_vals:
+        return 0.0
+    k = (len(sorted_vals) - 1) * (pct / 100.0)
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] * (1 - (k - lo)) + sorted_vals[hi] * (k - lo)
+
+
+def _cross_time(t: list[float], v: list[float], i: int, level: float) -> float:
+    """Interpolated time where the segment v[i-1]..v[i] crosses `level`."""
+    v0, v1 = v[i - 1], v[i]
+    if v1 == v0:
+        return t[i]
+    return t[i - 1] + (level - v0) / (v1 - v0) * (t[i] - t[i - 1])
+
+
+def get_pulse_width(channel: int = 1) -> float:
+    """Positive pulse width in seconds: how long the FIRST pulse stays high.
+
+    High/low levels come from the 10th/90th percentiles (robust to spikes, not raw
+    min/max). The threshold is the midpoint between them, with a 10% hysteresis band so
+    noise near the threshold does not double-count edges. Width is measured from the first
+    rising crossing to the following falling crossing, with the crossing times
+    interpolated between samples.
+
+    Returns 0.0 if the signal is flat or no complete high pulse is found in the record.
+    """
+    wf = _require_wave(int(channel))
+    v, t = wf.v, wf.t
+    n = len(v)
+    if n < 2:
+        return 0.0
+
+    s = sorted(v)
+    v_low = _percentile(s, 10.0)
+    v_high = _percentile(s, 90.0)
+    span = v_high - v_low
+    if span <= 0:
+        return 0.0                       # flat signal - no pulse
+
+    mid = (v_low + v_high) / 2.0
+    hi_th = mid + 0.1 * span             # hysteresis: must exceed this to count as "high"
+    lo_th = mid - 0.1 * span             # ...and drop below this to count as "low"
+
+    state_high = v[0] >= mid
+    rise_t: float | None = None
+    for i in range(1, n):
+        if not state_high and v[i] > hi_th:
+            state_high = True
+            rise_t = _cross_time(t, v, i, mid)
+        elif state_high and v[i] < lo_th:
+            state_high = False
+            if rise_t is not None:
+                return float(_cross_time(t, v, i, mid) - rise_t)
+    return 0.0                           # no complete positive pulse in the record
 
 
 # --- full arrays: bind to TestStand Number-array variables if you need them ---
@@ -461,16 +524,5 @@ def quick_identify(host: str, port: int = 4000) -> str:
     connect(host, port)
     try:
         return identify()
-    finally:
-        disconnect()
-
-
-def quick_vpp(host: str, channel: int = 1, points: int = 1000,
-              port: int = 4000) -> float:
-    """Connect, read the current record on one channel, return its Vpp, disconnect."""
-    connect(host, port)
-    try:
-        capture(str(channel), points)
-        return get_vpp(channel)
     finally:
         disconnect()

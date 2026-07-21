@@ -8,13 +8,6 @@ them straight to sequence variables with no parsing.
 Requires: TestStand 2019 or newer (Python Module adapter). No VISA needed.
 
 
-SAFETY
-------
-Setting up a waveform and switching an output ON are two SEPARATE calls. configure() and
-set_waveform() never enable an output. You must call output_on() deliberately - it drives
-real hardware. all_off() is the safe way to leave the bench.
-
-
 HOW IT MAPS ONTO A TESTSTAND SEQUENCE
 -------------------------------------
     Setup:    connect("169.254.8.135")           -> IDN string
@@ -32,9 +25,7 @@ from __future__ import annotations
 import os
 import sys
 
-# TestStand may load this module by file path, so its own folder might not be on the
-# import search path. Put it there first, so "import afg_socket" resolves to the file
-# sitting next to us.
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)

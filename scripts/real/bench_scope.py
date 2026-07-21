@@ -4,10 +4,15 @@
 #   python -c "import pyvisa; rm=pyvisa.ResourceManager('@py'); print('resources:', rm.list_resources())"
 #   cd C:\Users\25nar\KPITInternship\Autonomation\scripts\real
 # $env:SCOPE_RESOURCE = "USB0::0x0699::0x0527::C012345::INSTR"   # paste the exact string from Step 4
+#python -c "import pyvisa; rm=pyvisa.ResourceManager(r'C:\Program Files\IVI Foundation\VISA\Win64\TekVISA\Bin\Visa32.dll'); print(rm.list_resources())"
+
 
 # python bench_scope.py --identify
 # python bench_configure.py
 # python bench_scope.py --capture --channel 1
+
+# python -c "import pyvisa; rm=pyvisa.ResourceManager(r'C:\Windows\System32\tkVisa64.dll'); print('lib:', rm.visalib); print('resources:', rm.list_resources())"
+
 
 # set SCOPE_RESOURCE=TCPIP0::192.168.0.10::INSTR
 #   python bench_scope.py --identify
