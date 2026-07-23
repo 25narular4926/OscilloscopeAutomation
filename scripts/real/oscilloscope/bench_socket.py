@@ -566,6 +566,80 @@ def summarize(wf: Waveform) -> None:
     print(f"  Vpp  = {vmax - vmin:g} V  (min {vmin:g}, max {vmax:g})")
 
 
+# --- feature measurements on a Waveform ------------------------------------
+# Single source of truth for every metric, so the single-scope API and the
+# multi-scope (fleet) API measure identically. Each takes a Waveform.
+
+def measure_vmax(wf: Waveform) -> float:
+    return float(max(wf.v))
+
+
+def measure_vmin(wf: Waveform) -> float:
+    return float(min(wf.v))
+
+
+def measure_mean(wf: Waveform) -> float:
+    return float(sum(wf.v) / len(wf.v))
+
+
+def measure_rms(wf: Waveform) -> float:
+    """True RMS: sqrt(mean(v^2)) over the record. Works for any shape."""
+    return float((sum(x * x for x in wf.v) / len(wf.v)) ** 0.5)
+
+
+def _percentile(sorted_vals: list[float], pct: float) -> float:
+    """Linear-interpolation percentile of an ALREADY-SORTED list (pct in 0..100)."""
+    if not sorted_vals:
+        return 0.0
+    k = (len(sorted_vals) - 1) * (pct / 100.0)
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] * (1 - (k - lo)) + sorted_vals[hi] * (k - lo)
+
+
+def _cross_time(t: list[float], v: list[float], i: int, level: float) -> float:
+    """Interpolated time where the segment v[i-1]..v[i] crosses `level`."""
+    v0, v1 = v[i - 1], v[i]
+    if v1 == v0:
+        return t[i]
+    return t[i - 1] + (level - v0) / (v1 - v0) * (t[i] - t[i - 1])
+
+
+def measure_pulse_width(wf: Waveform) -> float:
+    """Positive pulse width in seconds: how long the FIRST pulse stays high.
+
+    High/low levels come from the 10th/90th percentiles (robust to spikes, not raw
+    min/max). The threshold is the midpoint between them, with a 10% hysteresis band so
+    noise near the threshold does not double-count edges. Width is measured from the first
+    rising crossing to the following falling crossing, with crossing times interpolated
+    between samples. Returns 0.0 if the signal is flat or no complete high pulse is found.
+    """
+    v, t = wf.v, wf.t
+    n = len(v)
+    if n < 2:
+        return 0.0
+    s = sorted(v)
+    v_low = _percentile(s, 10.0)
+    v_high = _percentile(s, 90.0)
+    span = v_high - v_low
+    if span <= 0:
+        return 0.0                           # flat signal - no pulse
+    mid = (v_low + v_high) / 2.0
+    hi_th = mid + 0.1 * span                  # must exceed this to count as "high"
+    lo_th = mid - 0.1 * span                  # ...and drop below this to count as "low"
+    state_high = v[0] >= mid
+    rise_t: float | None = None
+    for i in range(1, n):
+        if not state_high and v[i] > hi_th:
+            state_high = True
+            rise_t = _cross_time(t, v, i, mid)
+        elif state_high and v[i] < lo_th:
+            state_high = False
+            if rise_t is not None:
+                return float(_cross_time(t, v, i, mid) - rise_t)
+    return 0.0                                # no complete positive pulse in the record
+
+
 # --- CSV formatting -------------------------------------------------------
 # One place that decides how numbers look, so every CSV (per-channel and joint)
 # is formatted identically and the columns line up.
@@ -872,15 +946,31 @@ def _derive(path: str, suffix: str) -> str:
 
 def acquire_many(scope: SocketScope, channels: list[int],
                  points: int = 1000) -> dict[int, Waveform]:
-    """Capture each channel in turn. Channels with no data are skipped (with a note)."""
-    waves: dict[int, Waveform] = {}
-    for ch in channels:
-        wf = acquire(scope, ch, points)
-        if wf is None:
-            print(f"CH{ch}: no curve data - is the channel displayed and acquiring?",
-                  file=sys.stderr)
-            continue
-        waves[ch] = wf
+    """Capture each channel in turn, ALL from the same frozen record.
+
+    Every channel is read with its own DATa:SOURce + WFMOutpre + CURVe. If the scope is
+    still running, the record can change between the CH1 read and the CH2 read, leaving the
+    channels on DIFFERENT time windows (CH1 from one acquisition, CH2 from a later one).
+    So we STOP the scope first to freeze ONE record, read every channel off it, then resume
+    the run state. This guarantees all channels share one acquisition and one time axis.
+
+    Channels with no data are skipped (with a note).
+    """
+    was_running = is_running(scope)
+    if was_running:
+        scope.write("ACQuire:STATE STOP")     # freeze one record for a coherent read
+    try:
+        waves: dict[int, Waveform] = {}
+        for ch in channels:
+            wf = acquire(scope, ch, points)
+            if wf is None:
+                print(f"CH{ch}: no curve data - is the channel displayed and acquiring?",
+                      file=sys.stderr)
+                continue
+            waves[ch] = wf
+    finally:
+        if was_running:
+            scope.write("ACQuire:STATE RUN")   # leave the scope as we found it (live)
     return waves
 
 
