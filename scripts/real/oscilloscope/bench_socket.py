@@ -38,19 +38,52 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-class SocketScope:
-    """Minimal raw-socket SCPI client for the Tektronix Socket Server (Terminal mode)."""
+def detect_vendor(idn: str) -> str:
+    """Map an *IDN? string to a vendor key: 'tektronix' or 'keysight'.
 
-    def __init__(self, host: str, port: int = 4000, timeout: float = 5.0) -> None:
+    *IDN? starts with the manufacturer, e.g. 'TEKTRONIX,MSO44,...' or
+    'KEYSIGHT TECHNOLOGIES,DSOX1204A,...' (older Keysight scopes say 'AGILENT'). Anything
+    unrecognized defaults to 'tektronix' so existing benches keep working.
+    """
+    up = idn.upper()
+    if "KEYSIGHT" in up or "AGILENT" in up:
+        return "keysight"
+    return "tektronix"
+
+
+# --- Keysight value translations (the named setups use Tektronix terms) ---------------
+_KS_COUPLING = {"DC": "DC", "AC": "AC", "DCREJ": "DC"}          # Keysight has no DCREJ
+_KS_ACQ_TYPE = {"SAMPLE": "NORMal", "HIRES": "HRESolution",
+                "PEAKDETECT": "PEAK", "AVERAGE": "AVERage", "ENVELOPE": "PEAK"}
+_KS_SLOPE = {"RISE": "POSitive", "FALL": "NEGative"}
+
+
+def _ks_impedance(ohms: float) -> str:
+    """Tek termination (1e6 / 50 ohms) -> Keysight impedance keyword."""
+    return "FIFTy" if abs(float(ohms) - 50) < 1 else "ONEMeg"
+
+
+class SocketScope:
+    """Minimal raw-socket SCPI client. Detects the vendor (Tektronix / Keysight) from
+    *IDN? at connect, so configure()/acquire() can send the right SCPI for that brand."""
+
+    def __init__(self, host: str, port: int = 5025, timeout: float = 5.0) -> None:
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(1.0)      # per-read timeout used to detect "reply done"
         self._drain()                  # discard any connect-time banner / prompt
-        # Bare query responses. With HEADer ON the scope prefixes replies with the
-        # command path (":WFMOUTPRE:XZERO -2.0E-3"), which float() can't parse - this is
-        # THE classic "could not convert string to float" on the WFMOutpre reads. Force
-        # it off (and VERBose off for terse values) once per session.
-        self.write("HEADer OFF")
-        self.write("VERBose OFF")
+
+        # Read the identity FIRST (works with headers on or off) and pick the vendor.
+        self.idn = self.query("*IDN?").strip()
+        self.vendor = detect_vendor(self.idn)
+
+        # Bare query responses. With headers ON a scope prefixes replies with the command
+        # path (":WFMOUTPRE:XZERO -2.0E-3"), which float() can't parse - the classic
+        # "could not convert string to float". Turn headers off with the vendor's command.
+        if self.vendor == "keysight":
+            self.write(":SYSTem:HEADer OFF")
+        else:                          # tektronix (and unknown -> assume Tek-style)
+            self.write("HEADer OFF")
+            self.write("VERBose OFF")
 
     def _drain(self) -> None:
         """Read and throw away whatever is already waiting (banner, stale prompt)."""
@@ -260,10 +293,15 @@ def configure(scope: SocketScope, setup: ScopeSetup,
         (seconds) instead of s/div + record length. This is the scope's own Manual-
         mode relationship: record_length = sample_rate * duration, s/div = duration/10.
         The named setup itself is left untouched (we override locally, not in place).
+
+    The SCPI sent depends on the scope's vendor (detected at connect from *IDN?). The
+    same setup and the same returned Settings are used either way - only the commands
+    change, chosen by the `if ks:` branches below.
     """
     if channels is None:
         channels = sorted(setup.channels) or [1]
     settings: list[Setting] = []
+    ks = getattr(scope, "vendor", "tektronix") == "keysight"
 
     # Effective timebase. Default to the setup's values; a duration override recomputes
     # s/div and record length from it, keeping the setup's sample rate as the sampling
@@ -282,50 +320,79 @@ def configure(scope: SocketScope, setup: ScopeSetup,
     # Vertical — per channel, each using ITS OWN ChannelSetup.
     for n in channels:
         cs = setup.channels.get(n, setup.default_channel)
-        ch = f"CH{n}"
-        scope.write(f"SELect:{ch} ON")
-        if cs.scale is not None:
-            apply(f"{ch}:SCAle", cs.scale)
-        if cs.offset is not None:
-            apply(f"{ch}:OFFSet", cs.offset)
-        if cs.coupling:
-            apply(f"{ch}:COUPling", cs.coupling)
-        if cs.termination:
-            apply(f"{ch}:TERmination", cs.termination)      # 1e6 = 1 MOhm, 50 = 50 Ohm
-        if cs.bandwidth:
-            apply(f"{ch}:BANdwidth", cs.bandwidth)          # e.g. 500e6 = 500 MHz
+        if ks:
+            ch = f"CHANnel{n}"
+            scope.write(f":{ch}:DISPlay ON")                # display on (returns 1/0, not verified)
+            if cs.scale is not None:
+                apply(f":{ch}:SCALe", cs.scale)
+            if cs.offset is not None:
+                apply(f":{ch}:OFFSet", cs.offset)
+            if cs.coupling:
+                apply(f":{ch}:COUPling", _KS_COUPLING.get(cs.coupling.upper(), cs.coupling))
+            if cs.termination:
+                apply(f":{ch}:IMPedance", _ks_impedance(cs.termination))
+            # bandwidth: Keysight :CHANnel:BWLimit is only ON/OFF, so a Hz value does not
+            # map - left alone. Set it by hand if needed.
+        else:
+            ch = f"CH{n}"
+            scope.write(f"SELect:{ch} ON")
+            if cs.scale is not None:
+                apply(f"{ch}:SCAle", cs.scale)
+            if cs.offset is not None:
+                apply(f"{ch}:OFFSet", cs.offset)
+            if cs.coupling:
+                apply(f"{ch}:COUPling", cs.coupling)
+            if cs.termination:
+                apply(f"{ch}:TERmination", cs.termination)  # 1e6 = 1 MOhm, 50 = 50 Ohm
+            if cs.bandwidth:
+                apply(f"{ch}:BANdwidth", cs.bandwidth)      # e.g. 500e6 = 500 MHz
 
-    # Horizontal — global, sent once.
-    # MODE first: MANual must be set before sample rate / record length will stick.
-    if setup.horizontal_mode:
-        apply("HORizontal:MODE", setup.horizontal_mode)
-    if setup.sample_rate:
-        apply("HORizontal:SAMPLERate", setup.sample_rate)
-    if horizontal_scale:
-        apply("HORizontal:SCAle", horizontal_scale)
-    if record_length:
-        apply("HORizontal:RECOrdlength", record_length)
-    if setup.horizontal_position is not None:
-        # Where the trigger sits horizontally, as a % of the record before it.
-        apply("HORizontal:POSition", setup.horizontal_position)
-
-    # Acquisition — global, sent once.
-    if setup.acquire_mode:
-        apply("ACQuire:MODe", setup.acquire_mode)
-
-    # Trigger (edge) — global, sent once.
-    if setup.trigger_mode:
-        # NORMal = wait for the real trigger. AUTO = fire anyway after a timeout,
-        # which lets an acquisition complete without your event ever happening.
-        apply("TRIGger:A:MODe", setup.trigger_mode)
-    if setup.trigger_source:
-        apply("TRIGger:A:TYPe", "EDGE")
-        apply("TRIGger:A:EDGE:SOUrce", setup.trigger_source)
-        if setup.trigger_level is not None:
+    # Horizontal / acquisition / trigger — global, sent once.
+    if ks:
+        if horizontal_scale:
+            apply(":TIMebase:SCALe", horizontal_scale)      # value must be in the scope's range
+        # record length / memory depth is NOT settable over SCPI on InfiniiVision
+        # (:ACQuire:POINts is read-only, :ACQuire:MDEPth is undefined) - memory is auto and
+        # the transfer count is set at read time via :WAVeform:POINts. So nothing here.
+        # horizontal position (:TIMebase:REFerence) is not accepted on this family either;
+        # the trigger reference is left where it is. sample_rate/horizontal_mode are derived.
+        if setup.acquire_mode:
+            apply(":ACQuire:TYPE", _KS_ACQ_TYPE.get(setup.acquire_mode.upper(), setup.acquire_mode))
+        if setup.trigger_mode:
+            apply(":TRIGger:SWEep", setup.trigger_mode)     # AUTO / NORMal are the same words
+        if setup.trigger_source:
+            apply(":TRIGger:MODE", "EDGE")
             tn = _channel_number(setup.trigger_source)
-            apply(f"TRIGger:A:LEVel:CH{tn}", setup.trigger_level)
-        if setup.trigger_slope:
-            apply("TRIGger:A:EDGE:SLOpe", setup.trigger_slope)
+            apply(":TRIGger:EDGE:SOURce", f"CHAN{tn}")      # short form; readback is "CHAN1"
+            if setup.trigger_level is not None:
+                apply(":TRIGger:EDGE:LEVel", setup.trigger_level)
+            if setup.trigger_slope:
+                apply(":TRIGger:EDGE:SLOPe",
+                      _KS_SLOPE.get(setup.trigger_slope.upper(), setup.trigger_slope))
+    else:
+        # MODE first: MANual must be set before sample rate / record length will stick.
+        if setup.horizontal_mode:
+            apply("HORizontal:MODE", setup.horizontal_mode)
+        if setup.sample_rate:
+            apply("HORizontal:SAMPLERate", setup.sample_rate)
+        if horizontal_scale:
+            apply("HORizontal:SCAle", horizontal_scale)
+        if record_length:
+            apply("HORizontal:RECOrdlength", record_length)
+        if setup.horizontal_position is not None:
+            apply("HORizontal:POSition", setup.horizontal_position)
+        if setup.acquire_mode:
+            apply("ACQuire:MODe", setup.acquire_mode)
+        if setup.trigger_mode:
+            apply("TRIGger:A:MODe", setup.trigger_mode)
+        if setup.trigger_source:
+            apply("TRIGger:A:TYPe", "EDGE")
+            apply("TRIGger:A:EDGE:SOUrce", setup.trigger_source)
+            if setup.trigger_level is not None:
+                tn = _channel_number(setup.trigger_source)
+                apply(f"TRIGger:A:LEVel:CH{tn}", setup.trigger_level)
+            if setup.trigger_slope:
+                apply("TRIGger:A:EDGE:SLOpe", setup.trigger_slope)
 
     return settings
 
@@ -513,7 +580,44 @@ def acquire(scope: SocketScope, channel: int = 1, points: int = 1000) -> Wavefor
     Returns None (rather than raising) when the source has no waveform to describe - the
     channel is off, or the read happened before the record was ready. acquire_many() then
     skips that channel with a note instead of failing the whole capture.
+
+    Vendor-aware: Keysight scopes use :WAVeform:* commands, Tektronix use WFMOutpre/CURVe.
+    Both return the same Waveform.
     """
+    if getattr(scope, "vendor", "tektronix") == "keysight":
+        # --- Keysight: :WAVeform:PREamble? + :WAVeform:DATA? (ASCII = already in volts) ---
+        src = f"CHANnel{channel}"
+        scope.write(f":WAVeform:SOURce {src}")
+        scope.write(":WAVeform:FORMat ASCii")
+        scope.write(f":WAVeform:POINts {points}")
+        pre = _query_nonempty(scope, ":WAVeform:PREamble?")
+        if not pre:
+            print(f"CH{channel}: empty preamble - channel not displayed, or no acquisition yet.",
+                  file=sys.stderr)
+            return None
+        try:
+            # format,type,points,count,xincrement,xorigin,xreference,yincrement,yorigin,yreference
+            fields = [float(x) for x in pre.replace(";", ",").split(",") if x.strip()]
+        except ValueError:
+            return None
+        if len(fields) < 10:
+            return None
+        xincr, xorig, xref = fields[4], fields[5], fields[6]
+        raw = scope.query_raw(":WAVeform:DATA?").lstrip()
+        if raw.startswith("#"):                    # strip an IEEE definite-length block header
+            try:
+                ndig = int(raw[1])
+                raw = raw[2 + ndig:]
+            except (ValueError, IndexError):
+                pass
+        raw = re.sub(r"[^0-9eE+.\-,]", "", raw)     # keep only number/comma chars
+        v = [float(tok) for tok in raw.split(",") if tok]
+        if not v:
+            return None
+        t = [xorig + (i - xref) * xincr for i in range(len(v))]
+        return Waveform(f"CH{channel}", t, v, xincr, t[0])
+
+    # --- Tektronix: DATa:SOURce + WFMOutpre + CURVe? ---
     source = f"CH{channel}"
     scope.write(f"DATa:SOURce {source}")
     scope.write("DATa:ENCdg ASCii")          # ASCII so the curve comes back as text
@@ -1206,7 +1310,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--host", default=None,
                         help="Scope IP address (overrides the SCOPE_HOST env var).")
-    parser.add_argument("--port", type=int, default=4000,
+    parser.add_argument("--port", type=int, default=5025,
                         help="Socket Server port. Default: 4000.")
     parser.add_argument("--identify", action="store_true",
                         help="Query *IDN? and print the scope's identity (the default).")

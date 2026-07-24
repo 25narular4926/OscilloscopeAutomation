@@ -35,8 +35,10 @@ import bench_socket as bs  # noqa: E402
 # 5025 = LXI raw SCPI socket. We try each until *IDN? comes back.
 DEFAULT_PORTS = (4000, 5025)
 
-# Oscilloscope model families (to keep scopes and drop other LXI gear like the AFG).
-_SCOPE_FAMILIES = ("MSO", "DPO", "MDO", "TDS", "TBS", "DPS")
+# Scope vendors and model families (to keep scopes and drop other LXI gear like the AFG).
+# Families cover both brands: MSO/MSOX, DPO, MDO, TDS, DSO/DSOX, EDUX.
+_SCOPE_VENDORS = ("TEKTRONIX", "KEYSIGHT", "AGILENT")
+_SCOPE_FAMILIES = ("MSO", "DPO", "MDO", "TDS", "TBS", "DSO", "EDUX")
 
 # LXI mDNS service types instruments advertise.
 _MDNS_SERVICES = ("_lxi._tcp.local.", "_scpi-raw._tcp.local.",
@@ -72,9 +74,10 @@ def probe_idn(ip: str, port: int, timeout: float = 1.0) -> str:
 
 
 def is_scope(idn: str) -> bool:
-    """True if the *IDN? reply is a Tektronix oscilloscope (not an AFG or other gear)."""
+    """True if the *IDN? reply is a Tektronix or Keysight oscilloscope (not an AFG etc.)."""
     up = idn.upper()
-    return "TEKTRONIX" in up and any(fam in up for fam in _SCOPE_FAMILIES)
+    return (any(v in up for v in _SCOPE_VENDORS)
+            and any(fam in up for fam in _SCOPE_FAMILIES))
 
 
 def _idn_model(idn: str) -> str:

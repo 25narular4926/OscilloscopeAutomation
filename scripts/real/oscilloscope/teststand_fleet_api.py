@@ -238,7 +238,8 @@ def configure(alias: str, setup_name: str = "bench_full", channels: str = "",
 
     _record_length[alias] = 0
     for s in applied:
-        if s.label.upper().startswith("HORIZONTAL:RECO"):
+        lab = s.label.upper()
+        if "RECO" in lab or "POIN" in lab:      # Tek HORizontal:RECOrdlength / Keysight :ACQuire:POINts
             try:
                 _record_length[alias] = int(float(s.expected))
             except (TypeError, ValueError):

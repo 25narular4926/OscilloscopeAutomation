@@ -167,7 +167,8 @@ def configure(setup_name: str = "bench_full", channels: str = "",
     # transfer size to the full record instead of making the user recompute points.
     _record_length = 0
     for s in applied:
-        if s.label.upper().startswith("HORIZONTAL:RECO"):
+        lab = s.label.upper()
+        if "RECO" in lab or "POIN" in lab:      # Tek HORizontal:RECOrdlength / Keysight :ACQuire:POINts
             try:
                 _record_length = int(float(s.expected))
             except (TypeError, ValueError):
